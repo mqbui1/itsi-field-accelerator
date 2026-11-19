@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.pyo
+output/
+*.json
+!examples/*.json
+.DS_Store
+dist/
+*.egg-info/
+.env
+

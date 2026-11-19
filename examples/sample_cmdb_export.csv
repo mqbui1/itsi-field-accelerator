@@ -1,0 +1,11 @@
+name,sys_class_name,parent,business_service,environment,short_description
+Online Banking Portal,cmdb_ci_web_server,,Retail Banking Platform,production,Customer-facing web portal
+Mobile Banking API,cmdb_ci_app_server,,Retail Banking Platform,production,Mobile backend API
+Account Service,cmdb_ci_app_server,,Retail Banking Platform,production,Core account microservice
+Payment Processing,cmdb_ci_app_server,,Retail Banking Platform,production,Payment orchestration
+Fraud Detection,cmdb_ci_app_server,Payment Processing,Retail Banking Platform,production,ML fraud scoring
+Auth Service,cmdb_ci_app_server,,Retail Banking Platform,production,OAuth2 / OIDC
+Core Banking DB,cmdb_ci_database,Account Service,Retail Banking Platform,production,Primary PostgreSQL
+Transaction DB,cmdb_ci_database,Payment Processing,Retail Banking Platform,production,Payment ledger DB
+Event Bus,cmdb_ci_mq_server,,Retail Banking Platform,production,Kafka event streaming
+App Server Fleet,cmdb_ci_linux_server,Account Service,Retail Banking Platform,production,Application hosts

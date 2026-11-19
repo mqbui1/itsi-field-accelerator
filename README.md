@@ -66,10 +66,57 @@ roadmap for a future phase with no committed date. This tool fills that gap now.
 git clone https://github.com/mqbui1/itsi-field-accelerator.git
 cd itsi-field-accelerator
 pip install -r requirements.txt
-export ANTHROPIC_API_KEY=sk-ant-...   # required for AI commands
 ```
 
-**Requirements:** Python 3.9+, `anthropic`, `click`, `rich`, `requests`
+**Requirements:** Python 3.9+, `anthropic`, `click`, `rich`, `requests`, `boto3`
+
+---
+
+## AI Provider Configuration
+
+The tool auto-detects which AI backend to use — no flag needed.
+
+### Option 1: Anthropic API (default if key present)
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+```
+
+### Option 2: AWS Bedrock
+
+No API key needed — uses your existing AWS credentials. Ideal for teams already running
+workloads in AWS or organizations with Bedrock access through enterprise agreements.
+
+```bash
+# Any standard AWS credential method works:
+export AWS_ACCESS_KEY_ID=...
+export AWS_SECRET_ACCESS_KEY=...
+export AWS_DEFAULT_REGION=us-east-1   # optional, defaults to us-east-1
+
+# Or use a named profile:
+export AWS_PROFILE=my-profile
+
+# Or attach an IAM role (EC2/ECS/Lambda) — no env vars needed at all.
+```
+
+The default Bedrock model is `us.anthropic.claude-3-5-sonnet-20241022-v2:0` (Claude 3.5 Sonnet v2).
+Override with `BEDROCK_MODEL_ID` if your account uses a different model ID or cross-region inference prefix.
+
+```bash
+export BEDROCK_MODEL_ID=us.anthropic.claude-3-5-sonnet-20241022-v2:0
+```
+
+**Force a specific provider** (overrides auto-detection):
+
+```bash
+export ITSI_AI_PROVIDER=bedrock     # always use Bedrock
+export ITSI_AI_PROVIDER=anthropic   # always use Anthropic API
+```
+
+**Auto-detection order:**
+1. `ITSI_AI_PROVIDER` env var (explicit override)
+2. `ANTHROPIC_API_KEY` present → Anthropic API
+3. Fallback → AWS Bedrock (standard credential chain)
 
 ---
 

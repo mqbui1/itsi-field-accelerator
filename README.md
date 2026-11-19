@@ -1,11 +1,10 @@
 # ITSI Field Accelerator
 
-A CLI tool that collapses weeks of ITSI onboarding prep into minutes — using Claude AI
-to generate service trees, KPIs, and content packs from plain-English descriptions,
-ServiceNow CMDB exports, or pre-built vertical templates.
+> **AI-driven ITSI onboarding** — from plain-English architecture description or ServiceNow CMDB export
+> to a fully populated, ready-to-import ITSI content pack in minutes, not weeks.
 
-> Built to bridge the gap until Splunk's native AI-driven CMDB discovery ships.
-> Works today, on-prem and cloud.
+Built to bridge the gap until Splunk's native AI-driven CMDB discovery ships.
+Works today, on-prem and cloud, with **Anthropic API or AWS Bedrock**.
 
 ---
 
@@ -15,68 +14,111 @@ Standing up Splunk ITSI traditionally requires:
 
 | Step | Manual effort | Time |
 |------|--------------|------|
-| Service decomposition | 2-4 consultant workshops | 1-3 weeks |
-| KPI identification | Manual discovery per service type | 1-2 weeks |
-| SPL authoring | Deep Splunk expertise required | 1-2 weeks |
+| Service decomposition | 2–4 consultant workshops | 1–3 weeks |
+| KPI identification | Manual discovery per service type | 1–2 weeks |
+| SPL authoring | Deep Splunk expertise required | 1–2 weeks |
 | Entity mapping | Error-prone linking of CIs to services | Days |
 | Threshold configuration | Manual tuning or ML baseline wait | 1 week |
 
-**Total: 4-12 weeks before a customer sees meaningful service health.**
+**Total: 4–12 weeks before a customer sees meaningful service health.**
 
-Splunk's AI-driven service discovery shipped in ITSI 5.0.3 for Cloud customers. But
-CMDB-first workflows (ServiceNow → service tree) and on-premises parity are on the
-roadmap for a future phase with no committed date. This tool fills that gap now.
+This isn't anecdotal — Splunk's own product team named it "Blank Canvas Paralysis" in internal documentation.
+It's the leading reason customers stall after licensing ITSI and a known 6–9 month churn signal.
+
+Splunk shipped AI-Driven Service & KPI Discovery in ITSI 5.0.3 for Cloud customers — but CMDB-first
+workflows (ServiceNow → service tree) and on-premises parity remain on the roadmap with no committed date.
+**This tool fills that gap today.**
 
 ---
 
-## How It Works
+## How the AI Works
+
+The tool uses **Claude** (via Anthropic API or AWS Bedrock) as the core reasoning engine.
+Every AI command uses Claude's [tool use](https://docs.anthropic.com/en/docs/build-with-claude/tool-use)
+capability to produce structured, schema-validated output — not free-text that needs parsing.
 
 ```
-  Plain-English           ┌─────────────────────────────────────────┐
-  description  ──────────►│                                         │
-                           │   Claude AI                             │──► ITSI service tree
-  SNOW CMDB    ──────────►│   (service discovery + KPI generation) │    + KPIs + SPL
-  CSV / JSON               │                                         │──► Ready to import
-                           │   Template library fallback             │    via UI or REST API
-  Vertical name ──────────►│   (30+ KPIs, 9 service types)          │
-                           │                                         │
-  Existing pack ──────────►│   AI enrichment (gap-fill + improve)   │
-                           └─────────────────────────────────────────┘
+  Your input                    Claude AI pipeline                    Output
+  ──────────────────────────    ──────────────────────────────────    ────────────────────────
+  Plain-English description ──► Step 1: Service tree discovery    ──► Hierarchical service model
+                                  (architecture → services,             business / app / platform
+                                   CI types, SLA flags, deps)           / infra tiers
+
+                            ──► Step 2: KPI generation per svc   ──► 4–6 KPIs per service
+                                  (service context → golden            with real, runnable SPL
+                                   signal SPL, thresholds)             tailored to each type
+
+  SNOW CMDB CSV/JSON        ──► CI type inference (--ai-infer)   ──► Missing ci_class filled in
+                                  (name + description → type)         with confidence score
+
+  Existing content pack     ──► Step 1: Coverage assessment      ──► services_needing_kpis[]
+                                  (flat schema, reliable output)       missing_services[]
+                                                                        coverage_score 0–100
+                            ──► Step 2: Gap fill per service     ──► New KPIs added to pack
+                                  (same KPI generator as above)
 ```
 
+### Why two-step for enrichment?
+
+Claude reliably populates flat schemas. Deeply nested schemas
+(e.g. `service_improvements[].new_kpis[].thresholds`) cause it to return empty arrays.
+The `enrich` pipeline uses a deliberately simple assessment schema in Step 1 to get
+a stable list of flagged services, then calls the KPI generator independently per service in Step 2.
+This is why enrichment works reliably across all pack sizes.
+
+### What Claude understands natively
+
+**Service types** (inferred from names, descriptions, and architecture context):
+
+| Type | Examples |
+|------|----------|
+| `api_gateway` | Kong, AWS API GW, NGINX reverse proxy |
+| `app_server` | Spring Boot, Node.js, Django, .NET |
+| `payment_processor` | Stripe gateway, ACH processor, card auth |
+| `fraud_detection` | ML scoring engine, rules engine |
+| `auth_service` | OAuth provider, LDAP, Okta connector |
+| `database` | PostgreSQL, MySQL, Oracle, Cosmos DB |
+| `message_queue` | Kafka, RabbitMQ, SQS, Azure Service Bus |
+| `kubernetes` | K8s cluster, EKS, GKE, AKS |
+| `linux_host` | EC2, bare metal, VM hosts |
+
+**Golden signals per service type** (what Claude checks coverage for):
+
+| Signal | What it measures |
+|--------|-----------------|
+| **Latency** | p50/p95/p99 response time, DB query time |
+| **Traffic** | Requests/sec, messages/sec, transactions/min |
+| **Errors** | HTTP 5xx rate, exception rate, failed transactions |
+| **Saturation** | CPU/memory/connection pool utilization, queue depth |
+
 ---
 
-## Commands
-
-| Command | Mode | What it does |
-|---------|------|-------------|
-| `discover` | **AI** | Describe your architecture in plain English → Claude generates a full service tree with custom KPIs and SPL |
-| `enrich` | **AI** | Claude reviews an existing content pack, fills coverage gaps, improves KPIs, adds missing services |
-| `cmdb` | Template + optional AI | Parse a SNOW CMDB export → service tree with matched KPI templates; `--ai-infer` for Claude CI-type inference |
-| `bootstrap` | Template | Generate a demo-ready pack from a pre-built vertical template (banking, healthcare, retail, etc.) |
-| `kpi-discover` | Template + optional AI | Show KPI templates for a service type; `--ai` for Claude-generated custom KPIs |
-| `preflight` | Live check | Verify Splunk has the indexed data needed for ITSI onboarding |
-| `import` | Live push | Push a generated content pack into live ITSI via REST API |
-
----
-
-## Install
+## Quickstart
 
 ```bash
 git clone https://github.com/mqbui1/itsi-field-accelerator.git
 cd itsi-field-accelerator
 pip install -r requirements.txt
+
+# No API key needed — bootstrap works without AI:
+python -m itsi_accelerator bootstrap --vertical banking --output demo.json
+
+# AI mode — set your credentials (see "AI Provider" below), then:
+python -m itsi_accelerator discover \
+  --description "Java Spring Boot on Kubernetes: payments API, fraud scoring, PostgreSQL, Redis, Kafka. 99.9% SLA on payments." \
+  --context "FSI / banking, PCI-DSS required" \
+  --output banking_pack.json
 ```
 
 **Requirements:** Python 3.9+, `anthropic`, `click`, `rich`, `requests`, `boto3`
 
 ---
 
-## AI Provider Configuration
+## AI Provider
 
-The tool auto-detects which AI backend to use — no flag needed.
+The tool auto-detects which AI backend to use — no code changes or flags needed.
 
-### Option 1: Anthropic API (default if key present)
+### Option 1: Anthropic API
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
@@ -84,8 +126,8 @@ export ANTHROPIC_API_KEY=sk-ant-...
 
 ### Option 2: AWS Bedrock
 
-No API key needed — uses your existing AWS credentials. Ideal for teams already running
-workloads in AWS or organizations with Bedrock access through enterprise agreements.
+No separate API key needed — uses your existing AWS credentials. Ideal for teams already
+running workloads in AWS or organizations with Bedrock access through enterprise agreements.
 
 ```bash
 # Any standard AWS credential method works:
@@ -96,21 +138,16 @@ export AWS_DEFAULT_REGION=us-east-1   # optional, defaults to us-east-1
 # Or use a named profile:
 export AWS_PROFILE=my-profile
 
-# Or attach an IAM role (EC2/ECS/Lambda) — no env vars needed at all.
+# Or attach an IAM role (EC2 / ECS / Lambda) — no env vars needed at all.
 ```
 
-The default Bedrock model is `us.anthropic.claude-3-5-sonnet-20241022-v2:0` (Claude 3.5 Sonnet v2).
-Override with `BEDROCK_MODEL_ID` if your account uses a different model ID or cross-region inference prefix.
+Default Bedrock model: `us.anthropic.claude-3-5-sonnet-20241022-v2:0`
 
 ```bash
+# Override model or force a provider:
 export BEDROCK_MODEL_ID=us.anthropic.claude-3-5-sonnet-20241022-v2:0
-```
-
-**Force a specific provider** (overrides auto-detection):
-
-```bash
-export ITSI_AI_PROVIDER=bedrock     # always use Bedrock
-export ITSI_AI_PROVIDER=anthropic   # always use Anthropic API
+export ITSI_AI_PROVIDER=bedrock     # force Bedrock even if ANTHROPIC_API_KEY is set
+export ITSI_AI_PROVIDER=anthropic   # force Anthropic API
 ```
 
 **Auto-detection order:**
@@ -120,13 +157,26 @@ export ITSI_AI_PROVIDER=anthropic   # always use Anthropic API
 
 ---
 
+## Commands
+
+| Command | Mode | What it does |
+|---------|------|-------------|
+| `discover` | **AI** | Describe your architecture → Claude generates a full service tree with custom KPIs and SPL |
+| `enrich` | **AI** | Claude reviews a content pack, fills coverage gaps, adds missing services, scores 0–100 |
+| `cmdb` | Template + optional AI | Parse a SNOW CMDB export → service tree; `--ai-infer` for Claude CI-type inference |
+| `bootstrap` | Template | Generate a demo-ready pack from a pre-built vertical (no AI needed) |
+| `kpi-discover` | Template + optional AI | Show KPI templates for a service type; `--ai` for Claude-generated custom KPIs |
+| `preflight` | Live check | Verify Splunk has the indexed data needed for ITSI onboarding |
+| `import` | Live push | Push a generated content pack into live ITSI via REST API |
+
+---
+
 ## AI Commands
 
 ### `discover` — plain English to full content pack
 
-Describe your application architecture and Claude generates a complete ITSI content
-pack with services, dependencies, and KPIs — tailored to your specific stack,
-industry, and SLA requirements.
+Describe your application architecture and Claude generates a complete ITSI content pack
+with services, dependencies, and KPIs — tailored to your specific stack, industry, and SLA requirements.
 
 ```bash
 python -m itsi_accelerator discover \
@@ -140,9 +190,9 @@ python -m itsi_accelerator discover \
 
 **What Claude does:**
 1. Parses the architecture into a hierarchical service model (business → app → platform → infra)
-2. Infers service types (api_gateway, payment_processor, fraud_detection, etc.)
+2. Infers service types (`api_gateway`, `payment_processor`, `fraud_detection`, etc.)
 3. Identifies SLA-critical services and flags them for tighter KPI thresholds
-4. Generates 4-6 custom KPIs per service with real, runnable SPL tailored to each service type
+4. Generates 4–6 custom KPIs per service with real, runnable SPL tailored to each service type
 5. Wires parent-child dependencies based on the described call paths
 6. Flags monitoring coverage gaps (missing data sources, compliance blind spots)
 
@@ -186,10 +236,11 @@ Use `--template-kpis` to skip AI KPI generation and use curated templates instea
 
 ---
 
-### `enrich` — AI review and improvement of any content pack
+### `enrich` — AI review and gap-fill of any existing content pack
 
-Claude analyzes an existing pack (from `cmdb`, `bootstrap`, or `discover`),
-identifies gaps, adds missing KPIs, improves generic SPL, and flags missing services.
+Claude analyzes a pack from any source (`cmdb`, `bootstrap`, `discover`, or hand-built),
+identifies gaps, adds missing KPIs, and flags missing services. Uses a two-step AI pipeline
+(coverage assessment → per-service KPI generation) for reliable structured output.
 
 ```bash
 python -m itsi_accelerator enrich \
@@ -199,24 +250,38 @@ python -m itsi_accelerator enrich \
 ```
 
 ```bash
-# Just get a written review without modifying the pack:
+# Just get a written narrative review without modifying the pack:
 python -m itsi_accelerator enrich --pack banking_pack.json --review-only
 ```
 
-Claude assesses:
+**What Claude assesses:**
 - **Golden signal coverage**: latency, errors, traffic, saturation per service
-- **SPL quality**: is it specific enough, or too generic to be useful?
+- **SPL quality**: is it specific enough to be actionable, or too generic?
 - **Dependency completeness**: are call-path relationships accurately modeled?
-- **Threshold calibration**: are thresholds set, and appropriate for criticality?
 - **Missing services**: obvious tiers or components not in the pack
-- **Coverage score**: 0-100 overall monitoring coverage rating
+- **Coverage score**: 0–100 overall monitoring coverage rating
+
+**Example output:**
+```
+Coverage score: 54/100
+Summary: The pack covers application-layer services well but is missing infrastructure
+and platform KPIs. Kubernetes cluster health, Redis saturation, and Kafka consumer-lag
+signals are absent. 4 services flagged for improvement; 2 missing services identified.
+
+Applying 4 service improvements + 2 new services...
+
+Remaining gaps:
+  • No synthetic monitoring — external SLA validation not covered
+  • Kafka partition-replication health not instrumented
+```
 
 ---
 
-### `cmdb` with `--ai-infer`
+### `cmdb` with `--ai-infer` — smarter CI type inference
 
-When your CMDB export has missing or generic `sys_class_name` values, Claude
-infers the correct service type from each CI's name and description.
+Standard CMDB ingestion maps `sys_class_name` to KPI templates. When values are missing,
+generic, or use custom naming conventions, `--ai-infer` lets Claude classify each CI from
+its name and description instead.
 
 ```bash
 python -m itsi_accelerator cmdb \
@@ -235,10 +300,10 @@ Claude inferred types for 7 CIs:
 
 ---
 
-### `kpi-discover` with `--ai`
+### `kpi-discover` with `--ai` — custom KPIs for any service type
 
-Generate custom KPIs via Claude instead of static templates. Useful when you
-have specific sourcetypes or field names to work with.
+Generate KPIs via Claude instead of static templates. Useful when you have specific
+sourcetypes, field names, or non-standard technology to work with.
 
 ```bash
 python -m itsi_accelerator kpi-discover \
@@ -250,18 +315,16 @@ python -m itsi_accelerator kpi-discover \
 
 ---
 
-## Template Commands
+## Template Commands (no AI required)
 
 ### `bootstrap` — demo vertical templates
 
-Generates a complete ITSI content pack from a pre-built vertical bundle.
-No CMDB data or Splunk connection needed — ideal for demos and PoVs.
+Generates a complete ITSI content pack from a pre-built vertical bundle. No CMDB data,
+Splunk connection, or API key needed — the fastest way to get a working ITSI demo loaded.
 
 ```bash
 python -m itsi_accelerator bootstrap --vertical banking --output demo.json
 ```
-
-**Available verticals:**
 
 | Vertical | Services | Use case |
 |----------|----------|----------|
@@ -317,7 +380,7 @@ python -m itsi_accelerator preflight \
 ```
 
 Checks: connectivity, metric indexes present, host entities discoverable,
-recognized sourcetypes, data freshness. Returns a 0-100 readiness score.
+recognized sourcetypes, data freshness. Returns a 0–100 readiness score.
 
 ---
 
@@ -356,11 +419,11 @@ are tagged `ai-suggested` for easy review before production activation.
 itsi-field-accelerator/
 ├── itsi_accelerator/
 │   ├── ai/
-│   │   ├── claude_client.py      # Anthropic SDK wrapper (tool_use + streaming)
-│   │   ├── service_discoverer.py # Architecture description → service tree
-│   │   ├── kpi_generator.py      # Service context → custom KPIs with SPL
-│   │   ├── pack_enricher.py      # Review + gap-fill an existing pack
-│   │   └── cmdb_enricher.py      # Infer CI types for unclassified CIs
+│   │   ├── claude_client.py      # Provider auto-detection (Anthropic API + AWS Bedrock)
+│   │   ├── service_discoverer.py # Architecture description → service tree (tool_use)
+│   │   ├── kpi_generator.py      # Service context → custom KPIs with SPL (tool_use)
+│   │   ├── pack_enricher.py      # Two-step assessment + gap-fill pipeline
+│   │   └── cmdb_enricher.py      # Infer CI types for unclassified CIs (tool_use)
 │   ├── cli/main.py               # All CLI commands (click + rich)
 │   ├── cmdb/parser.py            # SNOW CSV/JSON → ContentPack
 │   ├── templates/
@@ -382,16 +445,18 @@ This tool is complementary, not competitive:
 
 | Capability | ITSI 5.0.3 AI Discovery | This tool |
 |------------|------------------------|-----------|
-| Works on-premises | Phase 2/3 (TBD) | Now |
-| CMDB as primary input | Phase 3 (TBD) | Now |
-| Works without indexed data | No | Yes (`discover`, `bootstrap`) |
-| AI-generated SPL | Yes (from indexed data) | Yes (from description + context) |
+| Works on-premises | Phase 2/3 (TBD) | **Now** |
+| CMDB as primary input (ServiceNow) | Phase 3 (TBD) | **Now** |
+| Works without indexed data | No | **Yes** (`discover`, `bootstrap`) |
+| AI-generated SPL | Yes (from indexed data) | **Yes** (from description + context) |
+| AWS Bedrock as AI backend | No | **Yes** |
 | Wizard-based UI | Yes | CLI |
-| Demo environment setup | No | Yes (`bootstrap`) |
-| Pack gap analysis + enrichment | No | Yes (`enrich`) |
+| Demo environment setup | No | **Yes** (`bootstrap`) |
+| Pack gap analysis + enrichment | No | **Yes** (`enrich`) |
+| Coverage scoring | No | **Yes** (0–100) |
 
 Use ITSI 5.0.3 AI Discovery for Cloud deployments with existing indexed data.
-Use this tool for on-prem, CMDB-first, pre-data, and demo/PoV scenarios.
+Use this tool for on-prem, CMDB-first, pre-data, demo/PoV, and pack improvement scenarios.
 
 ---
 

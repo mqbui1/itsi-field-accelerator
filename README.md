@@ -1,8 +1,8 @@
 # ITSI Field Accelerator
 
-A CLI tool that collapses weeks of ITSI onboarding prep into minutes — generating
-service trees, KPI mappings, and content packs from your ServiceNow CMDB export or
-a pre-built vertical template.
+A CLI tool that collapses weeks of ITSI onboarding prep into minutes — using Claude AI
+to generate service trees, KPIs, and content packs from plain-English descriptions,
+ServiceNow CMDB exports, or pre-built vertical templates.
 
 > Built to bridge the gap until Splunk's native AI-driven CMDB discovery ships.
 > Works today, on-prem and cloud.
@@ -17,44 +17,46 @@ Standing up Splunk ITSI traditionally requires:
 |------|--------------|------|
 | Service decomposition | 2-4 consultant workshops | 1-3 weeks |
 | KPI identification | Manual discovery per service type | 1-2 weeks |
-| SPL authoring for KPIs | Deep Splunk expertise required | 1-2 weeks |
+| SPL authoring | Deep Splunk expertise required | 1-2 weeks |
 | Entity mapping | Error-prone linking of CIs to services | Days |
-| Threshold configuration | Manual tuning or waiting for ML baseline | 1 week |
+| Threshold configuration | Manual tuning or ML baseline wait | 1 week |
 
 **Total: 4-12 weeks before a customer sees meaningful service health.**
 
-Splunk's product team is building AI-driven service discovery into ITSI — it shipped
-for Cloud customers in ITSI 5.0.3. But CMDB-first workflows (ServiceNow -> service tree)
-and on-premises parity are on the roadmap for a future phase with no committed date.
-
-This tool fills that gap now.
+Splunk's AI-driven service discovery shipped in ITSI 5.0.3 for Cloud customers. But
+CMDB-first workflows (ServiceNow → service tree) and on-premises parity are on the
+roadmap for a future phase with no committed date. This tool fills that gap now.
 
 ---
 
-## What It Does
+## How It Works
 
 ```
-                  ┌──────────────────────────────────────────────────┐
-  SNOW CMDB CSV   │                                                  │
-  ──────────────► │   ITSI Field Accelerator                        │──► itsi_pack.json
-                  │                                                  │
-  Vertical name   │  • CMDB parser (CI class → service type)        │──► Ready to import
-  ──────────────► │  • KPI template library (30+ templates, 9 types)│    into ITSI via UI
-                  │  • Service tree builder (parent/child deps)      │    or REST API
-  Splunk creds    │  • Pre-flight data checker                      │
-  ──────────────► │  • ITSI REST API importer                       │
-                  │                                                  │
-                  └──────────────────────────────────────────────────┘
+  Plain-English           ┌─────────────────────────────────────────┐
+  description  ──────────►│                                         │
+                           │   Claude AI                             │──► ITSI service tree
+  SNOW CMDB    ──────────►│   (service discovery + KPI generation) │    + KPIs + SPL
+  CSV / JSON               │                                         │──► Ready to import
+                           │   Template library fallback             │    via UI or REST API
+  Vertical name ──────────►│   (30+ KPIs, 9 service types)          │
+                           │                                         │
+  Existing pack ──────────►│   AI enrichment (gap-fill + improve)   │
+                           └─────────────────────────────────────────┘
 ```
 
-**Four commands:**
+---
 
-| Command | What it does |
-|---------|-------------|
-| `cmdb` | Parse a ServiceNow CMDB export and generate an ITSI content pack with services, KPIs, entity rules, and dependency wiring |
-| `bootstrap` | Generate a full demo-ready content pack from a pre-built vertical template (no CMDB needed) |
-| `kpi-discover` | Show recommended KPI templates for any service type or CI class |
-| `preflight` | Check if a Splunk instance has the indexed data needed for ITSI onboarding |
+## Commands
+
+| Command | Mode | What it does |
+|---------|------|-------------|
+| `discover` | **AI** | Describe your architecture in plain English → Claude generates a full service tree with custom KPIs and SPL |
+| `enrich` | **AI** | Claude reviews an existing content pack, fills coverage gaps, improves KPIs, adds missing services |
+| `cmdb` | Template + optional AI | Parse a SNOW CMDB export → service tree with matched KPI templates; `--ai-infer` for Claude CI-type inference |
+| `bootstrap` | Template | Generate a demo-ready pack from a pre-built vertical template (banking, healthcare, retail, etc.) |
+| `kpi-discover` | Template + optional AI | Show KPI templates for a service type; `--ai` for Claude-generated custom KPIs |
+| `preflight` | Live check | Verify Splunk has the indexed data needed for ITSI onboarding |
+| `import` | Live push | Push a generated content pack into live ITSI via REST API |
 
 ---
 
@@ -64,168 +66,240 @@ This tool fills that gap now.
 git clone https://github.com/mqbui1/itsi-field-accelerator.git
 cd itsi-field-accelerator
 pip install -r requirements.txt
+export ANTHROPIC_API_KEY=sk-ant-...   # required for AI commands
 ```
 
-**Requirements:** Python 3.9+, `click`, `rich`, `requests`
+**Requirements:** Python 3.9+, `anthropic`, `click`, `rich`, `requests`
 
 ---
 
-## Usage
+## AI Commands
 
-### cmdb — SNOW export to ITSI service tree
+### `discover` — plain English to full content pack
 
-Takes a ServiceNow CMDB export (CSV or JSON) and generates an ITSI content pack
-with services, KPIs, entity rules, and dependency relationships fully wired.
+Describe your application architecture and Claude generates a complete ITSI content
+pack with services, dependencies, and KPIs — tailored to your specific stack,
+industry, and SLA requirements.
+
+```bash
+python -m itsi_accelerator discover \
+  --description "Java Spring Boot microservices on Kubernetes: payments API, fraud
+    scoring engine, account management, notifications. PostgreSQL for accounts,
+    Redis cache, Kafka for async events. Needs 99.9% SLA on payments." \
+  --context "FSI / banking, PCI-DSS compliance required" \
+  --output banking_pack.json \
+  --index prod
+```
+
+**What Claude does:**
+1. Parses the architecture into a hierarchical service model (business → app → platform → infra)
+2. Infers service types (api_gateway, payment_processor, fraud_detection, etc.)
+3. Identifies SLA-critical services and flags them for tighter KPI thresholds
+4. Generates 4-6 custom KPIs per service with real, runnable SPL tailored to each service type
+5. Wires parent-child dependencies based on the described call paths
+6. Flags monitoring coverage gaps (missing data sources, compliance blind spots)
+
+**Example output (truncated):**
+
+```
+Architecture: A PCI-DSS-compliant FSI digital banking platform built on Java Spring Boot
+microservices orchestrated by Kubernetes. The monitoring strategy prioritizes the 99.9% SLA
+on the Payment Processing service tree, with fraud detection and authentication treated as
+equally critical synchronous dependencies.
+
+Discovered 16 services:
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ Service                         ┃ KPIs ┃ Tags                                ┃
+┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+│ Digital Banking Platform        │    0 │ ai-discovered, business             │
+│ Payment Processing              │    5 │ ai-discovered, application          │
+│ Fraud Scoring                   │    5 │ ai-discovered, application          │
+│ Account Management              │    5 │ ai-discovered, application          │
+│ Payments API Gateway            │    5 │ ai-discovered, application          │
+│ Event Streaming (Kafka)         │    5 │ ai-discovered, platform             │
+│ PostgreSQL Database             │    5 │ ai-discovered, platform             │
+│ Redis Cache                     │    5 │ ai-discovered, platform             │
+│ Kubernetes Platform             │    5 │ ai-discovered, infrastructure       │
+│ ...                             │      │                                     │
+└─────────────────────────────────┴──────┴─────────────────────────────────────┘
+
+Coverage gaps flagged by Claude:
+  • No APM / distributed tracing source mentioned — latency root-cause across
+    Spring Boot services will be blind without it
+  • No Kafka broker metrics source defined — JMX or Kafka exporter needed for
+    consumer-lag and under-replicated-partition KPIs
+  • PCI-DSS audit log ingestion not described — cardholder data environment
+    logs must flow into a separate, access-controlled index
+  • No synthetic / outside-in monitoring described — external payment API
+    health-check essential for validating the 99.9% SLA
+```
+
+Use `--template-kpis` to skip AI KPI generation and use curated templates instead
+(faster, still uses Claude for service tree discovery).
+
+---
+
+### `enrich` — AI review and improvement of any content pack
+
+Claude analyzes an existing pack (from `cmdb`, `bootstrap`, or `discover`),
+identifies gaps, adds missing KPIs, improves generic SPL, and flags missing services.
+
+```bash
+python -m itsi_accelerator enrich \
+  --pack banking_pack.json \
+  --output banking_enriched.json \
+  --index prod
+```
+
+```bash
+# Just get a written review without modifying the pack:
+python -m itsi_accelerator enrich --pack banking_pack.json --review-only
+```
+
+Claude assesses:
+- **Golden signal coverage**: latency, errors, traffic, saturation per service
+- **SPL quality**: is it specific enough, or too generic to be useful?
+- **Dependency completeness**: are call-path relationships accurately modeled?
+- **Threshold calibration**: are thresholds set, and appropriate for criticality?
+- **Missing services**: obvious tiers or components not in the pack
+- **Coverage score**: 0-100 overall monitoring coverage rating
+
+---
+
+### `cmdb` with `--ai-infer`
+
+When your CMDB export has missing or generic `sys_class_name` values, Claude
+infers the correct service type from each CI's name and description.
 
 ```bash
 python -m itsi_accelerator cmdb \
   --input cmdb_export.csv \
-  --output itsi_content_pack.json \
-  --title "Acme Corp Banking Platform" \
-  --index main
+  --output itsi_pack.json \
+  --ai-infer
 ```
 
-**Supported CSV columns** (auto-detected, case-insensitive):
-
-| Column | Aliases | Required |
-|--------|---------|----------|
-| `name` | `sys_name`, `ci_name`, `display_name` | Yes |
-| `sys_class_name` | `class`, `ci_class`, `type` | Yes |
-| `parent` | `parent_ci`, `parent_name`, `u_parent` | No |
-| `business_service` | `business_service_name`, `biz_service` | No |
-| `environment` | `env`, `u_environment` | No |
-| `short_description` | `description` | No |
-
-**Example CSV:**
-```csv
-name,sys_class_name,parent,business_service,environment,short_description
-Online Banking Portal,cmdb_ci_web_server,,Retail Banking Platform,production,Customer web portal
-Payment Service,cmdb_ci_app_server,,Retail Banking Platform,production,Payment orchestration
-Core Banking DB,cmdb_ci_database,Payment Service,Retail Banking Platform,production,Primary PostgreSQL
 ```
-
-**ServiceNow CI class mapping:**
-
-| SNOW CI Class | Service Type | KPI Templates Applied |
-|---|---|---|
-| `cmdb_ci_web_server` | web_server | HTTP error rate, response time, RPS |
-| `cmdb_ci_app_server` | app_server | Error rate, JVM heap, thread pool |
-| `cmdb_ci_database` | database | Query latency, connections, replication lag |
-| `cmdb_ci_linux_server` | linux_host | CPU, memory, disk utilization |
-| `cmdb_ci_k8s_cluster` | kubernetes | Pod restarts, availability, CPU throttling |
-| `cmdb_ci_mq_server` | message_queue | Consumer lag, message rate |
-| `cmdb_ci_apigee` | api_gateway | Error rate, P95 latency, rate limit hits |
+Claude inferred types for 7 CIs:
+  payments-orchestrator → payment_processor  (high confidence)
+  fraud-ml-svc          → fraud_detection    (high confidence)
+  redis-cluster-01      → database           (medium confidence)
+  ...
+```
 
 ---
 
-### bootstrap — demo environment from vertical template
+### `kpi-discover` with `--ai`
 
-Generates a complete ITSI content pack from a pre-built vertical template.
-No CMDB data or Splunk connection needed. Useful for demos, workshops, and PoVs.
+Generate custom KPIs via Claude instead of static templates. Useful when you
+have specific sourcetypes or field names to work with.
 
 ```bash
-python -m itsi_accelerator bootstrap \
-  --vertical banking \
-  --output demo_pack.json
+python -m itsi_accelerator kpi-discover \
+  --service-type payment_processor \
+  --description "Stripe-based payment gateway processing card transactions, ACH, and wire transfers" \
+  --index payments \
+  --ai
+```
+
+---
+
+## Template Commands
+
+### `bootstrap` — demo vertical templates
+
+Generates a complete ITSI content pack from a pre-built vertical bundle.
+No CMDB data or Splunk connection needed — ideal for demos and PoVs.
+
+```bash
+python -m itsi_accelerator bootstrap --vertical banking --output demo.json
 ```
 
 **Available verticals:**
 
 | Vertical | Services | Use case |
 |----------|----------|----------|
-| `banking` | Retail Banking Platform — web portal, mobile API, payments, fraud, auth, core banking DB, Kafka | FSI banking demos |
+| `banking` | Retail Banking Platform — web portal, mobile API, payments, fraud, auth, core DB, Kafka | FSI banking demos |
 | `healthcare` | Patient Care Platform — patient portal, EMR, claims, lab results, HL7 queue | Healthcare / payer demos |
-| `retail` | E-Commerce Platform — storefront, order mgmt, inventory, payment, fraud | Retail / CPG demos |
-| `telecom` | Subscriber Platform — BSS, billing, provisioning, subscriber DB | Telco / cable demos |
+| `retail` | E-Commerce Platform — storefront, order mgmt, inventory, payment gateway, fraud | Retail / CPG demos |
+| `telecom` | Subscriber Platform — BSS/OSS, billing, provisioning, subscriber DB | Telco / cable demos |
 | `manufacturing` | Smart Factory Platform — MES, ERP integration, QMS, SCADA bus | Industrial / OT demos |
 | `generic` | 3-tier web app — web, API gateway, app tier, auth, DB, cache, message bus | Generic demo / PoV |
 
 ---
 
-### kpi-discover — KPI recommendations for any service type
-
-Shows recommended KPI templates for a given service type, including SPL, metric
-name, unit, and suggested thresholds. Use this to plan KPI coverage before onboarding.
+### `cmdb` — SNOW export to service tree
 
 ```bash
-python -m itsi_accelerator kpi-discover \
-  --service-type payment_processor \
-  --index main \
-  --output payment_kpis.json
+python -m itsi_accelerator cmdb \
+  --input cmdb_export.csv \
+  --output itsi_pack.json \
+  --title "Acme Banking Platform" \
+  --index main
 ```
 
-**All supported service types:**
-`web_server`, `app_server`, `database`, `linux_host`, `kubernetes`,
-`message_queue`, `api_gateway`, `payment_processor`, `fraud_detection`, `auth_service`
+**Supported CSV columns** (auto-detected, case-insensitive):
 
-**Example output:**
-```
-                KPI Templates: payment_processor
-┏━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━┳━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━┓
-┃ KPI Title                 ┃ Metric              ┃ Unit  ┃ Yellow        ┃ Red           ┃
-┡━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━╇━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━┩
-│ Transaction Decline Rate  │ decline_pct         │ %     │ 2             │ 10            │
-│ Payment Processing Latency│ avg_latency         │ ms    │ 2000          │ 5000          │
-│ Failed Settlements        │ failed_settlements  │ count │ 1             │ 5             │
-└───────────────────────────┴─────────────────────┴───────┴───────────────┴───────────────┘
-```
+| Column | Aliases |
+|--------|---------|
+| `name` | `sys_name`, `ci_name`, `display_name` |
+| `sys_class_name` | `class`, `ci_class`, `type` |
+| `parent` | `parent_ci`, `parent_name`, `u_parent` |
+| `business_service` | `business_service_name`, `biz_service` |
+| `environment` | `env`, `u_environment` |
+| `short_description` | `description` |
+
+**CI class → KPI template mapping:**
+
+| SNOW CI Class | KPIs Applied |
+|---|---|
+| `cmdb_ci_web_server` | HTTP error rate, response time, RPS |
+| `cmdb_ci_app_server` | App error rate, JVM heap, thread pool queue |
+| `cmdb_ci_database` | Query latency, active connections, replication lag, failed txns |
+| `cmdb_ci_linux_server` | CPU, memory, disk utilization |
+| `cmdb_ci_k8s_cluster` | Pod restarts, availability %, CPU throttling |
+| `cmdb_ci_mq_server` | Consumer lag, messages per second |
 
 ---
 
-### preflight — data readiness check
-
-Connects to Splunk and runs a readiness check before starting ITSI onboarding.
-Answers: "Is the right data already in Splunk?"
+### `preflight` — data readiness check
 
 ```bash
 python -m itsi_accelerator preflight \
   --url https://splunk.example.com:8089 \
-  --token <splunk_token> \
-  --output preflight_report.json
+  --token <splunk_token>
 ```
 
-**Checks run:**
-
-| Check | What it looks for |
-|-------|------------------|
-| Connectivity | Splunk REST API reachable, auth valid, Splunk version |
-| Metric indexes | `em_metrics`, `itsi_im_metrics`, `metrics`, or `perf` present |
-| Host entities | Hosts discoverable via CPU/memory metric dimensions |
-| Sourcetypes | Recognized ITSI-compatible sourcetypes (`access_combined`, `kube:events`, etc.) |
-| Data freshness | Data present and recently updated |
-
-**Score interpretation:**
-- 80-100%: Ready for ITSI onboarding
-- 50-79%: Partial — some data onboarding needed first
-- <50%: Not ready — address failing checks before proceeding
+Checks: connectivity, metric indexes present, host entities discoverable,
+recognized sourcetypes, data freshness. Returns a 0-100 readiness score.
 
 ---
 
-### import — push content pack into live ITSI
+### `import` — push into live ITSI
 
 ```bash
 python -m itsi_accelerator import \
-  --pack itsi_content_pack.json \
+  --pack itsi_pack.json \
   --url https://splunk.example.com:8089 \
   --token <splunk_token>
 ```
 
-Alternatively, import via ITSI UI: **Configuration > Data Integrations > Content Library > Import**
+Or import via ITSI UI: **Configuration → Data Integrations → Content Library → Import**
 
 ---
 
 ## Content Pack Format
 
-Generated packs follow the ITSI content pack schema and can be imported via:
-- ITSI UI (Configuration > Data Integrations > Content Library)
-- REST API: `POST /servicesNS/nobody/SA-ITOA/itsi/content_packs/import`
-- This tool's `import` command
+Generated packs follow the ITSI content pack schema and import cleanly via
+the ITSI UI or REST API (`POST /servicesNS/nobody/SA-ITOA/itsi/content_packs/import`).
 
 Each pack includes:
-- **Services** with title, description, entity rules, dependency wiring, and tags
-- **KPIs** with SPL, metric name, unit, aggregation method, and threshold suggestions
-- **ServiceHealthScore** KPI auto-added to every service
-- **Parent-child dependency** relationships from CMDB `parent` column
+- **Services** with title, description, entity rules, dependency wiring, tags
+- **KPIs** with SPL, metric name, unit, aggregation method, threshold suggestions
+- **ServiceHealthScore** auto-added to every service
+- **Parent-child dependency** relationships from CMDB or AI-discovered topology
+
+AI-generated KPIs are tagged `_enriched_by_ai: true`. AI-suggested missing services
+are tagged `ai-suggested` for easy review before production activation.
 
 ---
 
@@ -234,22 +308,22 @@ Each pack includes:
 ```
 itsi-field-accelerator/
 ├── itsi_accelerator/
-│   ├── __main__.py              # python -m itsi_accelerator entry point
-│   ├── cli/
-│   │   └── main.py              # CLI commands (click + rich)
-│   ├── cmdb/
-│   │   └── parser.py            # SNOW CSV/JSON -> ContentPack
+│   ├── ai/
+│   │   ├── claude_client.py      # Anthropic SDK wrapper (tool_use + streaming)
+│   │   ├── service_discoverer.py # Architecture description → service tree
+│   │   ├── kpi_generator.py      # Service context → custom KPIs with SPL
+│   │   ├── pack_enricher.py      # Review + gap-fill an existing pack
+│   │   └── cmdb_enricher.py      # Infer CI types for unclassified CIs
+│   ├── cli/main.py               # All CLI commands (click + rich)
+│   ├── cmdb/parser.py            # SNOW CSV/JSON → ContentPack
 │   ├── templates/
-│   │   ├── kpi_library.py       # 30+ KPI templates across 9 service types
-│   │   └── verticals.py         # 6 pre-built vertical bundles
-│   ├── preflight/
-│   │   └── checker.py           # Splunk data readiness checks
+│   │   ├── kpi_library.py        # 30+ KPI templates, 9 service types, full SPL
+│   │   └── verticals.py          # 6 pre-built vertical bundles
+│   ├── preflight/checker.py      # Splunk data readiness (5 checks, scored)
 │   └── core/
-│       ├── models.py            # ContentPack, Service, KPI data models
-│       └── importer.py          # ITSI REST API importer
-├── examples/
-│   └── sample_cmdb_export.csv   # Sample input for testing
-└── requirements.txt
+│       ├── models.py             # ContentPack, Service, KPI data models
+│       └── importer.py           # ITSI REST API importer
+└── examples/sample_cmdb_export.csv
 ```
 
 ---
@@ -263,26 +337,29 @@ This tool is complementary, not competitive:
 |------------|------------------------|-----------|
 | Works on-premises | Phase 2/3 (TBD) | Now |
 | CMDB as primary input | Phase 3 (TBD) | Now |
-| Works without indexed data | No | Yes (bootstrap mode) |
-| AI-generated SPL | Yes | Curated templates |
+| Works without indexed data | No | Yes (`discover`, `bootstrap`) |
+| AI-generated SPL | Yes (from indexed data) | Yes (from description + context) |
 | Wizard-based UI | Yes | CLI |
-| Demo environment setup | No | Yes |
+| Demo environment setup | No | Yes (`bootstrap`) |
+| Pack gap analysis + enrichment | No | Yes (`enrich`) |
 
 Use ITSI 5.0.3 AI Discovery for Cloud deployments with existing indexed data.
-Use this tool for on-prem, CMDB-first, and demo/PoV scenarios.
+Use this tool for on-prem, CMDB-first, pre-data, and demo/PoV scenarios.
 
 ---
 
 ## Contributing
 
-KPI templates and vertical definitions live in `itsi_accelerator/templates/`.
-Adding a new service type:
-
-1. Add a template entry to `KPI_TEMPLATES` in `kpi_library.py`
+**Adding a new service type (template path):**
+1. Add entries to `KPI_TEMPLATES` in `itsi_accelerator/templates/kpi_library.py`
 2. Add CI class aliases to `CI_CLASS_ALIASES`
 3. Optionally add the service type to a vertical in `verticals.py`
 
-PRs welcome for new service types, verticals, and CI class mappings.
+**Adding a new vertical:**
+Add an entry to `VERTICALS` in `itsi_accelerator/templates/verticals.py` following
+the existing pattern (list of CI dicts with `name`, `ci_class`, `parent`, `business_service`).
+
+PRs welcome for new service types, verticals, CI class mappings, and AI prompt improvements.
 
 ---
 

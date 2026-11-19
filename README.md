@@ -157,6 +157,73 @@ export ITSI_AI_PROVIDER=anthropic   # force Anthropic API
 
 ---
 
+## Claude Code Skill
+
+If you use [Claude Code](https://claude.ai/code), the tool ships with a companion skill
+that lets you invoke it conversationally — no terminal switching, no flags to remember.
+
+### Setup
+
+The skill lives in the [splunk-observability-toolkit](https://github.com/mqbui1/splunk-observability-toolkit)
+under `skills/itsi-accelerator/`. Once that toolkit is loaded in your Claude Code session,
+just describe what you need:
+
+```
+"generate an ITSI content pack for a healthcare platform on Kubernetes"
+"enrich my existing banking pack and fill the coverage gaps"
+"bootstrap an ITSI demo for a retail customer"
+"help me onboard a new ITSI customer — they have a ServiceNow CMDB export"
+```
+
+### What the skill handles automatically
+
+| Step | What happens |
+|------|-------------|
+| **Prerequisites** | Checks the repo is cloned, Python deps are installed, and which AI provider is available. Installs missing deps. |
+| **Mode detection** | Infers `discover` / `enrich` / `cmdb` / `bootstrap` from your message. Asks once if ambiguous. |
+| **Conversational intake** | Collects only the inputs needed for that mode — description, index, output path. Sensible defaults for everything optional. |
+| **Runs the CLI** | Executes `python3 -m itsi_accelerator <mode> ...` with your inputs. |
+| **Surfaces results** | Shows the service table, coverage score, and flagged gaps inline. |
+| **Follow-up** | Offers to enrich → import → preflight as next steps without leaving the conversation. |
+
+### Example conversation
+
+```
+You:    Generate an ITSI content pack for a FSI customer. Java Spring Boot on
+        Kubernetes, PostgreSQL, Redis, Kafka. 99.9% SLA on the payments service.
+
+Claude: Running discover mode...
+        [checks prerequisites, confirms Anthropic API provider]
+        [runs: python3 -m itsi_accelerator discover --description "..." --context "FSI" ...]
+
+        Done. 14 services → banking_pack.json
+        Coverage gaps flagged:
+          • No APM/distributed tracing source mentioned
+          • No synthetic monitoring for SLA validation
+
+        Next: enrich it to fill the gaps, or import it directly into ITSI?
+
+You:    Enrich it.
+
+Claude: [runs: python3 -m itsi_accelerator enrich --pack banking_pack.json ...]
+
+        Coverage score: 81/100 (was 54/100)
+        Added 18 KPIs across 4 services. 2 new services added.
+        Remaining gaps: synthetic monitoring, Kafka JMX source
+```
+
+### Without the toolkit
+
+You can also invoke the CLI directly in any Claude Code session by asking Claude to run:
+
+```bash
+cd /path/to/itsi-field-accelerator
+python3 -m itsi_accelerator discover --description "..." --output pack.json
+```
+
+
+---
+
 ## Commands
 
 | Command | Mode | What it does |

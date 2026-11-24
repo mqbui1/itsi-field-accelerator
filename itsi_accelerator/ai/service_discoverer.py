@@ -112,3 +112,52 @@ def discover_services(description: str, context: str = "") -> dict:
         tool_name="create_service_tree",
         tool_schema=DISCOVER_TOOL,
     )
+
+
+def classify_apm_services(
+    nodes: list[dict],
+    edges: list[dict],
+    context: str = "",
+) -> dict:
+    """
+    Given a live APM service map (nodes + edges from O11y or AppD),
+    classify services into an ITSI-ready tree with CI types and monitoring tiers.
+
+    Args:
+        nodes: List of service node dicts (must include 'name'; may include 'operationCount', etc.)
+        edges: List of dependency edge dicts (must include 'origin' and 'destination')
+        context: Additional context (industry, compliance, team, etc.)
+
+    Returns:
+        Dict with 'services', 'architecture_summary', 'recommended_index', 'coverage_gaps'
+        (same schema as discover_services)
+    """
+    nodes_text = "\n".join(
+        f"- {n['name']}" + (f"  (ops: {n['operationCount']})" if n.get("operationCount") else "")
+        for n in nodes
+    )
+    edges_text = "\n".join(
+        f"- {e['origin']} → {e['destination']}"
+        + (f"  ({e['requestCount']:,} req/min)" if e.get("requestCount") else "")
+        for e in edges
+    ) or "(no dependency edges detected — infer from service names)"
+
+    prompt = (
+        "Live APM service map pulled from Splunk Observability Cloud:\n\n"
+        f"Services:\n{nodes_text}\n\n"
+        f"Dependencies (caller → called):\n{edges_text}\n"
+    )
+    if context:
+        prompt += f"\nAdditional context: {context}"
+    prompt += (
+        "\n\nClassify these APM services into an ITSI service tree. "
+        "Assign ITSI CI types, monitoring tiers, and dependency hierarchy. "
+        "Infer the top-level business service from the topology."
+    )
+
+    return tool_call(
+        system=SYSTEM,
+        user=prompt,
+        tool_name="create_service_tree",
+        tool_schema=DISCOVER_TOOL,
+    )

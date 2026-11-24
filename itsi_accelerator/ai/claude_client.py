@@ -111,6 +111,34 @@ def tool_call(
     raise RuntimeError(f"Claude did not invoke tool '{tool_name}'. Response: {resp}")
 
 
+def tool_call_with_image(
+    system: str,
+    content: list,
+    tool_name: str,
+    tool_schema: dict,
+    model: str | None = None,
+    max_tokens: int = 8192,
+) -> dict[str, Any]:
+    """
+    Like tool_call but accepts a pre-built content list (text + image blocks).
+    Used for vision-based inputs (architecture diagrams, etc.).
+    """
+    client = get_client()
+    active_model = model or get_model()
+    resp = client.messages.create(
+        model=active_model,
+        max_tokens=max_tokens,
+        system=system,
+        tools=[{"name": tool_name, "description": tool_schema["description"], "input_schema": tool_schema["input_schema"]}],
+        tool_choice={"type": "tool", "name": tool_name},
+        messages=[{"role": "user", "content": content}],
+    )
+    for block in resp.content:
+        if block.type == "tool_use" and block.name == tool_name:
+            return block.input
+    raise RuntimeError(f"Claude did not invoke tool '{tool_name}'. Response: {resp}")
+
+
 def stream_text(system: str, user: str, model: str | None = None) -> str:
     """Stream a plain-text response and return the full text."""
     client = get_client()

@@ -122,14 +122,117 @@ class Service:
 
 
 @dataclass
+class Entity:
+    title: str
+    identifier_fields: list[str]        # fields that uniquely ID this entity (e.g. ["host"])
+    informational_fields: list[dict]    # extra fields to show in entity detail view
+    service_key: str = ""               # _key of the owning service
+    _key: str = field(default_factory=new_id)
+    object_type: str = "entity"
+
+    def to_dict(self) -> dict:
+        d: dict[str, Any] = {
+            "_key": self._key,
+            "title": self.title,
+            "object_type": self.object_type,
+            "identifier": {
+                "fields": self.identifier_fields,
+                "values": ["*"],
+            },
+            "informational": self.informational_fields,
+        }
+        if self.service_key:
+            d["services"] = [{"_key": self.service_key}]
+        return d
+
+
+@dataclass
+class CorrelationSearch:
+    name: str
+    description: str
+    search: str                     # SPL
+    service_key: str = ""
+    severity: str = "medium"        # low, medium, high, critical
+    alert_title: str = ""
+    cron_schedule: str = "*/5 * * * *"
+    _key: str = field(default_factory=new_id)
+
+    def to_dict(self) -> dict:
+        return {
+            "_key": self._key,
+            "name": self.name,
+            "description": self.description,
+            "search": self.search,
+            "cron_schedule": self.cron_schedule,
+            "disabled": 0,
+            "alert.severity": self.severity,
+            "is_notable": 1,
+            "action.itsi_event_generator": "1",
+            "action.itsi_event_generator.param.title": self.alert_title or self.name,
+            "action.itsi_event_generator.param.severity": self.severity,
+            "services": [{"_key": self.service_key}] if self.service_key else [],
+        }
+
+
+@dataclass
+class NotableEventAggregationPolicy:
+    title: str
+    description: str
+    service_key: str
+    break_after_silence_minutes: int = 15
+    split_by_field: str = "service_id"
+    _key: str = field(default_factory=new_id)
+
+    def to_dict(self) -> dict:
+        return {
+            "_key": self._key,
+            "title": self.title,
+            "description": self.description,
+            "run_time_based_auto_pause": 1,
+            "auto_pause_after_trigger_time": self.break_after_silence_minutes * 60,
+            "notable_event_count_enabled": 1,
+            "rules": [
+                {
+                    "title": f"Group by {self.split_by_field}",
+                    "type": "auto",
+                    "filter_criteria": {
+                        "clause": "and",
+                        "items": [
+                            {"field": "service_id", "value": self.service_key, "operator": "="}
+                        ],
+                    },
+                    "break_criteria": {
+                        "clause": "or",
+                        "items": [
+                            {"field": "break_by_nb_of_events", "value": "100"},
+                        ],
+                    },
+                    "split_by_field": self.split_by_field,
+                }
+            ],
+            "executing_actions": [
+                {
+                    "type": "itsi_event_action_link_url",
+                    "execute_on": "trigger",
+                    "params": {"label": "Investigate in ITSI", "url": ""},
+                }
+            ],
+        }
+
+
+@dataclass
 class ContentPack:
     title: str
     description: str = ""
     version: str = "1.0.0"
     _key: str = field(default_factory=new_id)
     services: list[Service] = field(default_factory=list)
+    entities: list[Entity] = field(default_factory=list)
     kpi_base_searches: list[KPIBaseSearch] = field(default_factory=list)
     threshold_templates: list[KPIThresholdTemplate] = field(default_factory=list)
+    # These are exported separately (not part of content pack import API)
+    correlation_searches: list[CorrelationSearch] = field(default_factory=list)
+    neaps: list[NotableEventAggregationPolicy] = field(default_factory=list)
 
     def add_service(self, svc: Service) -> None:
         self.services.append(svc)
@@ -143,6 +246,7 @@ class ContentPack:
             "_key": self._key,
             "data": {
                 "services": [s.to_dict() for s in self.services],
+                "entities": [e.to_dict() for e in self.entities],
                 "kpi_base_searches": [
                     {
                         "_key": k._key,
@@ -162,4 +266,17 @@ class ContentPack:
                     for t in self.threshold_templates
                 ],
             },
+        }
+
+    def to_neap_bundle(self) -> dict:
+        """
+        Serialize correlation searches + NEAPs as a separate JSON bundle.
+        This is loaded via the ITSI REST API or packaged into a Splunk app,
+        NOT via the content pack import endpoint.
+        """
+        return {
+            "title": self.title,
+            "_pack_key": self._key,
+            "correlation_searches": [cs.to_dict() for cs in self.correlation_searches],
+            "notable_event_aggregation_policies": [n.to_dict() for n in self.neaps],
         }

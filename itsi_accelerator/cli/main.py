@@ -16,9 +16,9 @@ console = Console()
 
 
 @click.group()
-@click.version_option("0.2.0")
+@click.version_option("0.3.0")
 def cli():
-    """ITSI Field Accelerator — fast-track ITSI onboarding from CMDB data, vertical templates, or plain-English descriptions."""
+    """ITSI Field Accelerator — fast-track ITSI onboarding from CMDB data, vertical templates, APM topology, or plain-English descriptions."""
     pass
 
 
@@ -97,101 +97,32 @@ def discover(description, context, output, index, ai_kpis):
         -o claims_pack.json
     """
     from itsi_accelerator.ai.service_discoverer import discover_services
-    from itsi_accelerator.ai.kpi_generator import generate_kpis
-    from itsi_accelerator.cmdb.parser import CMDBParser
-    from itsi_accelerator.templates.kpi_library import get_kpis_for_service_type, render_kpi
-    from itsi_accelerator.core.models import ContentPack, Service, KPI, EntityRule, new_id
 
     console.print(Panel(
         f"[bold]Discovering service tree...[/]\n[dim]{description[:120]}{'...' if len(description) > 120 else ''}[/]",
         title="[cyan]Claude AI Discovery[/]",
     ))
 
-    # Step 1: Claude discovers the service tree
     with console.status("[cyan]Analyzing architecture...[/]"):
         discovery = discover_services(description, context=context)
 
-    services_data = discovery.get("services", [])
     summary = discovery.get("architecture_summary", "")
-    gaps = discovery.get("coverage_gaps", [])
-    rec_index = discovery.get("recommended_index", index)
+    if summary:
+        console.print(f"\n[bold]Architecture:[/] {summary}")
 
-    console.print(f"\n[bold]Architecture:[/] {summary}")
-    console.print(f"[dim]Discovered {len(services_data)} services[/]")
-
-    # Step 2: Build the content pack
-    pack = ContentPack(
+    pack = _build_pack_from_discovery(
+        discovery=discovery,
         title=f"AI Discovery: {description[:50]}...",
-        description=summary,
+        index=index,
+        ai_kpis=ai_kpis,
+        context=context,
     )
 
-    name_to_key: dict[str, str] = {}
-
-    for svc_data in services_data:
-        svc = Service(
-            title=svc_data["name"],
-            description=svc_data.get("description", ""),
-            tags=["field-accelerator", "ai-discovered", svc_data.get("monitoring_tier", "")],
-        )
-        entity_field = svc_data.get("entity_field", "host")
-        svc.entity_rules.append(EntityRule(field=entity_field, value="*", rule_type="matches"))
-        name_to_key[svc_data["name"]] = svc._key
-
-        ci_type = svc_data.get("ci_type", "app_server")
-        sla_critical = svc_data.get("sla_critical", False)
-
-        if ci_type == "business_service":
-            # Top-level services get no KPIs — health rolls up from children
-            pass
-        elif ai_kpis:
-            # Claude generates custom KPIs per service
-            with console.status(f"[cyan]Generating KPIs for {svc_data['name']}...[/]"):
-                try:
-                    kpi_result = generate_kpis(
-                        service_name=svc_data["name"],
-                        service_description=svc_data.get("description", ""),
-                        ci_type=ci_type,
-                        index=rec_index,
-                        sla_critical=sla_critical,
-                        industry_context=context,
-                    )
-                    for kpi_def in kpi_result.get("kpis", []):
-                        spl = kpi_def.get("base_search", "").replace("{index}", rec_index)
-                        kpi = KPI(
-                            title=kpi_def["title"],
-                            base_search=spl,
-                            unit=kpi_def.get("unit", ""),
-                            aggregate_statop=kpi_def.get("aggregate_statop", "avg"),
-                            description=kpi_def.get("description", ""),
-                        )
-                        svc.add_kpi(kpi)
-                except Exception as e:
-                    console.print(f"[yellow]KPI generation failed for {svc_data['name']}: {e}. Using templates.[/]")
-                    _apply_template_kpis(svc, ci_type, rec_index)
-        else:
-            _apply_template_kpis(svc, ci_type, rec_index)
-
-        pack.add_service(svc)
-
-    # Step 3: Wire dependencies
-    for svc_data in services_data:
-        parent_name = svc_data.get("parent", "")
-        if not parent_name:
-            continue
-        parent_key = name_to_key.get(parent_name)
-        child_key = name_to_key.get(svc_data["name"])
-        if parent_key and child_key:
-            parent_svc = next((s for s in pack.services if s._key == parent_key), None)
-            if parent_svc and child_key not in parent_svc.services_depends_on:
-                parent_svc.services_depends_on.append(child_key)
-
-    # Step 4: Save
-    pack_dict = pack.to_dict()
-    Path(output).write_text(json.dumps(pack_dict, indent=2))
-
+    Path(output).write_text(json.dumps(pack.to_dict(), indent=2))
     console.print(f"\n[bold green]Done.[/] {len(pack.services)} services -> [cyan]{output}[/]")
     _print_service_table(pack)
 
+    gaps = discovery.get("coverage_gaps", [])
     if gaps:
         console.print("\n[yellow]Coverage gaps to address:[/]")
         for g in gaps:
@@ -354,7 +285,545 @@ def import_pack(pack, url, token, no_ssl_verify):
         sys.exit(1)
 
 
+# ── apm ───────────────────────────────────────────────────────────────────────
+
+@cli.command()
+@click.option("--source", "-s", default="splunk_o11y", show_default=True,
+              type=click.Choice(["splunk_o11y", "appd"], case_sensitive=False),
+              help="APM source: splunk_o11y (Splunk Observability Cloud) or appd (AppDynamics, coming soon)")
+@click.option("--token", "-t", required=True, envvar="SPLUNK_ACCESS_TOKEN",
+              help="API token for the APM source (env: SPLUNK_ACCESS_TOKEN)")
+@click.option("--realm", "-r", default="us0", show_default=True,
+              help="Splunk O11y realm (us0, us1, eu0, jp0, au0)")
+@click.option("--environment", "-e", required=True,
+              help="APM environment name (e.g. prod, staging, production)")
+@click.option("--lookback", default=60, show_default=True,
+              help="Lookback window in minutes when pulling the service map")
+@click.option("--context", "-c", default="",
+              help="Additional context for Claude (industry, team, compliance, etc.)")
+@click.option("--output", "-o", default="apm_pack.json", show_default=True)
+@click.option("--index", default="main", show_default=True, help="Splunk index for generated KPI SPL")
+@click.option("--ai-kpis/--template-kpis", default=True, show_default=True)
+@click.option("--no-ssl-verify", is_flag=True, default=False)
+def apm(source, token, realm, environment, lookback, context, output, index, ai_kpis, no_ssl_verify):
+    """
+    Generate ITSI service tree from a live APM service map.
+
+    Pulls the real service topology from your APM tool, classifies each service
+    with ITSI CI types and monitoring tiers via Claude, then generates KPIs.
+
+    Example (Splunk O11y):
+      python -m itsi_accelerator apm \\
+        --token $SPLUNK_ACCESS_TOKEN --realm us1 --environment prod \\
+        -o prod_pack.json
+    """
+    if source == "appd":
+        console.print("[red]AppDynamics source is not yet implemented.[/]")
+        console.print("[dim]Set --source splunk_o11y to use Splunk Observability Cloud.[/]")
+        sys.exit(1)
+
+    from itsi_accelerator.apm.splunk_o11y import SplunkO11yClient
+    from itsi_accelerator.ai.service_discoverer import classify_apm_services
+
+    console.print(Panel(
+        f"[bold]APM source:[/] Splunk O11y ({realm})\n"
+        f"[bold]Environment:[/] {environment}\n"
+        f"[bold]Lookback:[/] {lookback} minutes",
+        title="[cyan]APM Service Map Import[/]",
+    ))
+
+    client = SplunkO11yClient(realm=realm, token=token, verify_ssl=not no_ssl_verify)
+
+    with console.status("[cyan]Pulling service map from Splunk O11y APM...[/]"):
+        try:
+            service_map = client.get_service_map(environment=environment, lookback_minutes=lookback)
+        except Exception as e:
+            console.print(f"[bold red]Failed to fetch service map:[/] {e}")
+            sys.exit(1)
+
+    nodes = service_map["nodes"]
+    edges = service_map["edges"]
+    console.print(f"[dim]Found {len(nodes)} services, {len(edges)} dependency edges[/]")
+
+    with console.status("[cyan]Claude is classifying the APM topology into ITSI services...[/]"):
+        discovery = classify_apm_services(nodes=nodes, edges=edges, context=context)
+
+    pack = _build_pack_from_discovery(
+        discovery=discovery,
+        title=f"APM Import: {environment} ({realm})",
+        index=index,
+        ai_kpis=ai_kpis,
+        context=context,
+    )
+
+    Path(output).write_text(json.dumps(pack.to_dict(), indent=2))
+    console.print(f"\n[bold green]Done.[/] {len(pack.services)} services -> [cyan]{output}[/]")
+    _print_service_table(pack)
+
+    gaps = discovery.get("coverage_gaps", [])
+    if gaps:
+        console.print("\n[yellow]Coverage gaps to address:[/]")
+        for g in gaps:
+            console.print(f"  • {g}")
+
+
+# ── diagram ────────────────────────────────────────────────────────────────────
+
+@cli.command()
+@click.option("--image", "-i", required=True,
+              help="Architecture diagram file (PNG, JPEG, GIF, WEBP, or SVG)")
+@click.option("--context", "-c", default="",
+              help="Additional context (industry, stack, SLA requirements)")
+@click.option("--output", "-o", default="diagram_pack.json", show_default=True)
+@click.option("--index", default="main", show_default=True, help="Splunk index for generated KPI SPL")
+@click.option("--ai-kpis/--template-kpis", default=True, show_default=True)
+def diagram(image, context, output, index, ai_kpis):
+    """
+    AI-driven: analyze an architecture diagram image and generate an ITSI content pack.
+
+    Claude reads the diagram visually (or as SVG text) and infers the full service
+    tree — services, dependencies, CI types, and monitoring tiers.
+
+    Supported formats: PNG, JPEG, GIF, WEBP, SVG
+
+    Example:
+      python -m itsi_accelerator diagram \\
+        -i architecture.png -c "healthcare SaaS, 99.9% SLA" \\
+        -o arch_pack.json
+    """
+    from itsi_accelerator.ai.diagram_analyzer import analyze_diagram
+
+    console.print(Panel(
+        f"[bold]Diagram:[/] {image}\n"
+        + (f"[bold]Context:[/] {context}" if context else "[dim]No additional context provided[/]"),
+        title="[cyan]Diagram Analysis[/]",
+    ))
+
+    with console.status("[cyan]Claude is analyzing the diagram...[/]"):
+        try:
+            discovery = analyze_diagram(image_path=image, context=context)
+        except (FileNotFoundError, ValueError) as e:
+            console.print(f"[bold red]Error:[/] {e}")
+            sys.exit(1)
+
+    summary = discovery.get("architecture_summary", "")
+    if summary:
+        console.print(f"\n[bold]Architecture:[/] {summary}")
+
+    pack = _build_pack_from_discovery(
+        discovery=discovery,
+        title=f"Diagram Import: {Path(image).stem}",
+        index=index,
+        ai_kpis=ai_kpis,
+        context=context,
+    )
+
+    Path(output).write_text(json.dumps(pack.to_dict(), indent=2))
+    console.print(f"\n[bold green]Done.[/] {len(pack.services)} services -> [cyan]{output}[/]")
+    _print_service_table(pack)
+
+    gaps = discovery.get("coverage_gaps", [])
+    if gaps:
+        console.print("\n[yellow]Coverage gaps to address:[/]")
+        for g in gaps:
+            console.print(f"  • {g}")
+
+
+# ── degrade ───────────────────────────────────────────────────────────────────
+
+@cli.command()
+@click.option("--pack", "-p", required=True, help="Content pack JSON — used to know what services exist")
+@click.option("--scenario", "-s", default=None,
+              help="Scenario name to run (substring match). Omit to list all and choose interactively.")
+@click.option("--target", default="simulate", show_default=True,
+              type=click.Choice(["simulate", "k8s", "hec", "otel-demo"], case_sensitive=False),
+              help="Execution target. 'simulate' is a safe dry-run.")
+@click.option("--duration", "-d", default=300, show_default=True,
+              help="Seconds to hold the degradation before auto-recovering")
+@click.option("--namespace", "-n", default="default", show_default=True, help="Kubernetes namespace")
+@click.option("--kubeconfig", default="~/.kube/config", show_default=True)
+@click.option("--hec-url", default="", help="Splunk HEC URL (required for --target hec)")
+@click.option("--hec-token", default="", envvar="SPLUNK_HEC_TOKEN",
+              help="Splunk HEC token (env: SPLUNK_HEC_TOKEN)")
+@click.option("--featureflag-url", default="http://localhost:8013", show_default=True,
+              help="OTel Demo feature flag service URL (used with --target otel-demo)")
+@click.option("--context", "-c", default="",
+              help="Additional context for Claude scenario generation (app name, stack, industry)")
+@click.option("--all", "run_all", is_flag=True, default=False,
+              help="Run all generated scenarios sequentially")
+@click.option("--index", default="main", show_default=True, help="Splunk index (used in HEC events)")
+def degrade(pack, scenario, target, duration, namespace, kubeconfig, hec_url, hec_token,
+            featureflag_url, context, run_all, index):
+    """
+    Inject a degradation scenario and auto-recover after --duration seconds.
+
+    Claude generates realistic failure scenarios from your content pack (which services
+    exist, what KPIs they have). You pick one to run. The command injects the failure,
+    holds it, then recovers — giving the demo audience enough time to see ITSI react.
+
+    Safe by default: --target simulate (dry-run) prints what WOULD happen without
+    touching anything.
+
+    Targets:
+      simulate   — dry-run, prints commands and talking points (default)
+      k8s        — executes kubectl commands against your cluster
+      otel-demo  — toggles OpenTelemetry Demo feature flags (cleanest for astroshop)
+      hec        — sends synthetic events to Splunk HEC
+
+    Examples:
+      # Plan scenarios (no execution)
+      python -m itsi_accelerator degrade --pack apm_pack.json
+
+      # Run the cascade scenario against k8s
+      python -m itsi_accelerator degrade --pack apm_pack.json \\
+        --scenario cascade --target k8s --namespace otel-demo --duration 300
+
+      # OTel Demo feature flag injection
+      python -m itsi_accelerator degrade --pack apm_pack.json \\
+        --target otel-demo --featureflag-url http://localhost:8013
+    """
+    from itsi_accelerator.ai.scenario_generator import generate_scenarios
+    from itsi_accelerator.degrade.executor import run_scenario
+
+    pack_dict = json.loads(Path(pack).read_text())
+    services_raw = pack_dict.get("data", {}).get("services", [])
+    if not services_raw:
+        console.print("[red]No services found in pack.[/]")
+        sys.exit(1)
+
+    # Build service summary for scenario generator
+    services_summary = []
+    for s in services_raw:
+        kpis = [k for k in s.get("kpis", []) if k.get("title") != "ServiceHealthScore"]
+        services_summary.append({
+            "name": s["title"],
+            "description": s.get("description", ""),
+            "ci_type": _infer_ci_type_from_tags(s.get("tags", [])),
+            "sla_critical": "sla-critical" in " ".join(s.get("tags", [])).lower(),
+            "kpis": kpis[:4],
+        })
+
+    console.print(Panel(
+        f"[bold]Pack:[/] {pack_dict.get('title', pack)}\n"
+        f"[bold]Services:[/] {len(services_raw)}\n"
+        f"[bold]Target:[/] {target}\n"
+        f"[bold]Duration:[/] {duration}s",
+        title="[cyan]ITSI Degradation Scenarios[/]",
+    ))
+
+    with console.status("[cyan]Claude is generating demo scenarios...[/]"):
+        scenarios = generate_scenarios(services=services_summary, context=context)
+
+    if not scenarios:
+        console.print("[red]No scenarios generated.[/]")
+        sys.exit(1)
+
+    # Print scenario menu
+    console.print(f"\n[bold]Generated {len(scenarios)} scenarios:[/]\n")
+    table = Table(show_lines=False)
+    table.add_column("#", style="dim", width=3)
+    table.add_column("Scenario", style="bold")
+    table.add_column("Service")
+    table.add_column("Type", style="cyan")
+    table.add_column("Severity", style="yellow")
+    table.add_column("Alert in")
+    for i, sc in enumerate(scenarios, 1):
+        sev_color = "red" if sc["severity"] == "critical" else "yellow" if sc["severity"] == "high" else "white"
+        table.add_row(
+            str(i),
+            sc["name"],
+            sc["service_name"],
+            sc["failure_type"],
+            f"[{sev_color}]{sc['severity']}[/]",
+            f"~{sc['time_to_alert_seconds']}s",
+        )
+    console.print(table)
+
+    # Select scenario(s) to run
+    to_run: list[dict] = []
+    if run_all:
+        to_run = scenarios
+    elif scenario:
+        # Substring match on name
+        matches = [sc for sc in scenarios if scenario.lower() in sc["name"].lower()
+                   or scenario.lower() in sc["failure_type"].lower()
+                   or scenario.lower() in sc["service_name"].lower()]
+        if not matches:
+            console.print(f"[red]No scenario matching '{scenario}'.[/] Available: "
+                          + ", ".join(sc["name"] for sc in scenarios))
+            sys.exit(1)
+        to_run = matches[:1]
+    else:
+        # Interactive selection
+        console.print("\nEnter scenario number to run (or 'q' to quit, 'a' to run all): ", end="")
+        choice = click.prompt("", default="q")
+        if choice.lower() == "q":
+            sys.exit(0)
+        if choice.lower() == "a":
+            to_run = scenarios
+        else:
+            try:
+                idx = int(choice) - 1
+                if 0 <= idx < len(scenarios):
+                    to_run = [scenarios[idx]]
+                else:
+                    console.print("[red]Invalid selection.[/]")
+                    sys.exit(1)
+            except ValueError:
+                console.print("[red]Invalid input.[/]")
+                sys.exit(1)
+
+    if target == "simulate":
+        console.print("\n[yellow]Running in SIMULATE mode — no changes will be made.[/]")
+    elif target == "k8s":
+        console.print(f"\n[yellow]Running against k8s namespace '{namespace}'.[/]")
+        if not click.confirm("Proceed?"):
+            sys.exit(0)
+
+    # Run each selected scenario
+    def _print(msg: str):
+        console.print(msg)
+
+    all_ok = True
+    for sc in to_run:
+        ok = run_scenario(
+            scenario=sc,
+            target=target,
+            duration=duration,
+            namespace=namespace,
+            kubeconfig=kubeconfig,
+            hec_url=hec_url,
+            hec_token=hec_token,
+            featureflag_url=featureflag_url,
+            print_fn=_print,
+        )
+        all_ok = all_ok and ok
+
+    if not all_ok:
+        sys.exit(1)
+
+
+# ── neap ──────────────────────────────────────────────────────────────────────
+
+@cli.command()
+@click.option("--pack", "-p", required=True, help="Content pack JSON (output of discover/apm/diagram/cmdb)")
+@click.option("--output", "-o", default=None,
+              help="Output path for NEAP bundle JSON (default: <pack>_neap_bundle.json)")
+@click.option("--index", default="main", show_default=True, help="Splunk index for correlation search SPL")
+@click.option("--context", "-c", default="", help="Additional context for Claude (industry, stack, etc.)")
+@click.option("--silence", default=15, show_default=True,
+              help="Episode break-after-silence window in minutes")
+@click.option("--no-correlation-searches", is_flag=True, default=False,
+              help="Skip AI-generated correlation searches (NEAPs only)")
+def neap(pack, output, index, context, silence, no_correlation_searches):
+    """
+    Generate NEAPs + correlation searches for an existing content pack.
+
+    NEAPs (Notable Event Aggregation Policies) are generated from templates — one per
+    service, grouping notables into episodes. Correlation searches are AI-generated
+    SPL that fire notables into those episodes.
+
+    Output is a separate JSON bundle loaded via the ITSI REST API or packaged into
+    a Splunk app alongside the content pack.
+
+    Example:
+      python -m itsi_accelerator neap --pack apm_pack.json -o apm_neap_bundle.json
+    """
+    from itsi_accelerator.core.models import CorrelationSearch, NotableEventAggregationPolicy
+    from itsi_accelerator.templates.neap_templates import build_neaps
+
+    pack_path = Path(pack)
+    pack_dict = json.loads(pack_path.read_text())
+    pack_title = pack_dict.get("title", pack_path.stem)
+
+    services_raw = pack_dict.get("data", {}).get("services", [])
+    if not services_raw:
+        console.print("[red]No services found in pack.[/]")
+        sys.exit(1)
+
+    console.print(Panel(
+        f"[bold]Pack:[/] {pack_title}\n"
+        f"[bold]Services:[/] {len(services_raw)}\n"
+        f"[bold]Silence window:[/] {silence} minutes",
+        title="[cyan]NEAP + Correlation Search Generator[/]",
+    ))
+
+    # Rebuild lightweight Service stubs (just _key + title + depends_on) for NEAP builder
+    from itsi_accelerator.core.models import Service, EntityRule
+    svc_stubs = []
+    for s in services_raw:
+        stub = Service(
+            title=s["title"],
+            description=s.get("description", ""),
+        )
+        stub._key = s["_key"]
+        stub.services_depends_on = s.get("services_depends_on", [])
+        svc_stubs.append(stub)
+
+    # 1. Generate NEAPs (template-based, no AI)
+    neap_objects = build_neaps(svc_stubs, break_after_silence_minutes=silence)
+    console.print(f"[dim]Generated {len(neap_objects)} NEAPs[/]")
+
+    # 2. Generate correlation searches (AI, one batched call)
+    cs_objects: list[CorrelationSearch] = []
+    if not no_correlation_searches:
+        from itsi_accelerator.ai.correlation_search_generator import generate_correlation_searches
+
+        # Build service summary for Claude — include KPI names for context
+        services_summary = []
+        key_to_name = {s["_key"]: s["title"] for s in services_raw}
+        for s in services_raw:
+            kpis = s.get("kpis", [])
+            # filter out the synthetic ServiceHealthScore KPI
+            real_kpis = [k for k in kpis if k.get("title") != "ServiceHealthScore"]
+            services_summary.append({
+                "name": s["title"],
+                "description": s.get("description", ""),
+                "ci_type": _infer_ci_type_from_tags(s.get("tags", [])),
+                "sla_critical": "sla-critical" in " ".join(s.get("tags", [])).lower(),
+                "kpis": real_kpis[:4],
+            })
+
+        with console.status("[cyan]Claude is generating correlation searches...[/]"):
+            cs_dicts = generate_correlation_searches(
+                services=services_summary,
+                index=index,
+                context=context,
+            )
+
+        # Map service names back to keys
+        name_to_key = {s["title"]: s["_key"] for s in services_raw}
+        for cs_dict in cs_dicts:
+            svc_key = name_to_key.get(cs_dict.get("service_name", ""), "")
+            cs_objects.append(CorrelationSearch(
+                name=cs_dict["name"],
+                description=cs_dict.get("description", ""),
+                search=cs_dict["search"],
+                service_key=svc_key,
+                severity=cs_dict.get("severity", "medium"),
+                alert_title=cs_dict.get("alert_title", cs_dict["name"]),
+                cron_schedule=cs_dict.get("cron_schedule", "*/5 * * * *"),
+            ))
+        console.print(f"[dim]Generated {len(cs_objects)} correlation searches[/]")
+
+    # 3. Serialize
+    bundle = {
+        "title": pack_title,
+        "_pack_key": pack_dict.get("_key", ""),
+        "correlation_searches": [cs.to_dict() for cs in cs_objects],
+        "notable_event_aggregation_policies": [n.to_dict() for n in neap_objects],
+    }
+
+    out_path = Path(output) if output else pack_path.with_name(pack_path.stem + "_neap_bundle.json")
+    out_path.write_text(json.dumps(bundle, indent=2))
+
+    console.print(f"\n[bold green]Done.[/]")
+    console.print(f"  NEAPs:               [cyan]{len(neap_objects)}[/]")
+    console.print(f"  Correlation searches: [cyan]{len(cs_objects)}[/]")
+    console.print(f"  Output:              [cyan]{out_path}[/]")
+    console.print(
+        "\n[dim]Load via ITSI REST API:\n"
+        "  NEAPs:   POST /itsi/notable_event_aggregation_policy\n"
+        "  Corr:    POST /saved/searches (with itsi_event_generator action)\n"
+        "Or package into a Splunk app alongside your content pack.[/]"
+    )
+
+
 # ── helpers ───────────────────────────────────────────────────────────────────
+
+def _build_pack_from_discovery(
+    discovery: dict,
+    title: str,
+    index: str,
+    ai_kpis: bool,
+    context: str,
+) -> "ContentPack":
+    """
+    Shared builder: turns a Claude discovery dict (services, architecture_summary,
+    recommended_index, coverage_gaps) into a fully populated ContentPack.
+    Automatically generates entities for each service.
+    Used by: discover, apm, diagram.
+    """
+    from itsi_accelerator.ai.kpi_generator import generate_kpis
+    from itsi_accelerator.core.models import ContentPack, Service, KPI, EntityRule, Entity
+
+    services_data = discovery.get("services", [])
+    summary = discovery.get("architecture_summary", "")
+    rec_index = discovery.get("recommended_index", index)
+
+    console.print(f"[dim]Discovered {len(services_data)} services[/]")
+
+    pack = ContentPack(title=title, description=summary)
+    name_to_key: dict[str, str] = {}
+
+    for svc_data in services_data:
+        svc = Service(
+            title=svc_data["name"],
+            description=svc_data.get("description", ""),
+            tags=["field-accelerator", "ai-discovered", svc_data.get("monitoring_tier", "")],
+        )
+        entity_field = svc_data.get("entity_field", "host")
+        svc.entity_rules.append(EntityRule(field=entity_field, value="*", rule_type="matches"))
+        name_to_key[svc_data["name"]] = svc._key
+
+        ci_type = svc_data.get("ci_type", "app_server")
+        sla_critical = svc_data.get("sla_critical", False)
+
+        if ci_type != "business_service":
+            if ai_kpis:
+                with console.status(f"[cyan]Generating KPIs for {svc_data['name']}...[/]"):
+                    try:
+                        kpi_result = generate_kpis(
+                            service_name=svc_data["name"],
+                            service_description=svc_data.get("description", ""),
+                            ci_type=ci_type,
+                            index=rec_index,
+                            sla_critical=sla_critical,
+                            industry_context=context,
+                        )
+                        for kpi_def in kpi_result.get("kpis", []):
+                            spl = kpi_def.get("base_search", "").replace("{index}", rec_index)
+                            svc.add_kpi(KPI(
+                                title=kpi_def["title"],
+                                base_search=spl,
+                                unit=kpi_def.get("unit", ""),
+                                aggregate_statop=kpi_def.get("aggregate_statop", "avg"),
+                                description=kpi_def.get("description", ""),
+                            ))
+                    except Exception as e:
+                        console.print(f"[yellow]KPI generation failed for {svc_data['name']}: {e}. Using templates.[/]")
+                        _apply_template_kpis(svc, ci_type, rec_index)
+            else:
+                _apply_template_kpis(svc, ci_type, rec_index)
+
+        pack.add_service(svc)
+
+        # Auto-generate an entity for each service so it's immediately usable in ITSI
+        entity = Entity(
+            title=svc_data["name"],
+            identifier_fields=[entity_field],
+            informational_fields=[
+                {"alias": "Service Type", "field": "ci_type"},
+                {"alias": "Environment", "field": "environment"},
+            ],
+            service_key=svc._key,
+        )
+        pack.entities.append(entity)
+
+    # Wire dependencies
+    for svc_data in services_data:
+        parent_name = svc_data.get("parent", "")
+        if not parent_name:
+            continue
+        parent_key = name_to_key.get(parent_name)
+        child_key = name_to_key.get(svc_data["name"])
+        if parent_key and child_key:
+            parent_svc = next((s for s in pack.services if s._key == parent_key), None)
+            if parent_svc and child_key not in parent_svc.services_depends_on:
+                parent_svc.services_depends_on.append(child_key)
+
+    return pack
+
 
 def _apply_template_kpis(svc, ci_type: str, index: str) -> None:
     from itsi_accelerator.templates.kpi_library import get_kpis_for_service_type, render_kpi
@@ -368,6 +837,19 @@ def _apply_template_kpis(svc, ci_type: str, index: str) -> None:
             aggregate_statop=rendered.get("aggregate_statop", "avg"),
             description=rendered.get("description", ""),
         ))
+
+
+def _infer_ci_type_from_tags(tags: list[str]) -> str:
+    """Best-effort CI type inference from service tags (used by neap command for existing packs)."""
+    tag_str = " ".join(tags).lower()
+    for ci_type in [
+        "database", "web_server", "app_server", "kubernetes", "cache",
+        "message_queue", "api_gateway", "auth_service", "load_balancer",
+        "streaming", "business_service",
+    ]:
+        if ci_type.replace("_", " ") in tag_str or ci_type in tag_str:
+            return ci_type
+    return "app_server"
 
 
 def _print_service_table(pack) -> None:

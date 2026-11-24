@@ -36,15 +36,24 @@ month churn signal.
 git clone https://github.com/mqbui1/itsi-field-accelerator.git
 cd itsi-field-accelerator
 pip install -r requirements.txt
+export ANTHROPIC_API_KEY=sk-ant-...   # or AWS Bedrock — see AI Provider below
+```
 
-# No API key needed — bootstrap works without AI:
-python -m itsi_accelerator bootstrap --vertical banking --output demo.json
+**OTel Demo (fastest path — 3 commands):**
 
-# Full demo flow (AI mode):
-python -m itsi_accelerator diagram -i architecture.png -o pack.json
-python -m itsi_accelerator neap --pack pack.json -o neap_bundle.json
-python -m itsi_accelerator probe --url https://show.splunkcloud.com --token $TOKEN --pack pack.json --watch
-python -m itsi_accelerator degrade --pack pack.json --target otel-demo
+```bash
+# 1. One-time setup: build pack → NEAPs → import to ITSI → probe readiness
+python -m itsi_accelerator setup \
+  --vertical otel-demo \
+  --url https://my-show.splunkcloud.com \
+  --token $SPLUNK_TOKEN
+
+# 2. During the demo — live readiness board on a second monitor
+python -m itsi_accelerator probe \
+  --url https://my-show.splunkcloud.com --token $SPLUNK_TOKEN --watch
+
+# 3. Break something (and watch ITSI react)
+python -m itsi_accelerator degrade --vertical otel-demo --target otel-demo
 ```
 
 **Requirements:** Python 3.9+, `anthropic`, `click`, `rich`, `requests`, `boto3`
@@ -53,7 +62,20 @@ python -m itsi_accelerator degrade --pack pack.json --target otel-demo
 
 ## Demo Flow
 
-The accelerator covers the full arc from blank ITSI to a live, breaking demo:
+**Simple path (OTel Demo / known verticals):**
+
+```
+setup --vertical otel-demo --url ... --token ...
+  └── Step 1: Bootstrap content pack from template  (no AI)
+  └── Step 2: Generate NEAPs + correlation searches  (Claude, one call)
+  └── Step 3: Import pack to ITSI via REST API
+  └── Step 4: Probe readiness → prints verdict + next steps
+
+degrade --vertical otel-demo --target otel-demo   ← inject during demo
+probe --watch                                      ← monitor on second monitor
+```
+
+**Advanced path (custom / customer architectures):**
 
 ```
 1. Build the content pack
@@ -63,13 +85,13 @@ The accelerator covers the full arc from blank ITSI to a live, breaking demo:
    cmdb -i export.csv                   ← from ServiceNow CMDB
 
 2. Add episode management
-   neap --pack pack.json                ← NEAPs + correlation searches
+   neap --pack pack.json                ← NEAPs + correlation searches (+ --validate to dry-run SPL)
 
 3. Load into ITSI
    import --pack pack.json --url ...    ← pushes via ITSI REST API
 
 4. Verify everything is live
-   probe --pack pack.json --watch       ← live readiness board on a second monitor
+   probe --pack pack.json --watch       ← readiness board + rolling activity log
 
 5. Break something (and watch ITSI react)
    degrade --pack pack.json --target otel-demo --duration 300
@@ -79,18 +101,26 @@ The accelerator covers the full arc from blank ITSI to a live, breaking demo:
 
 ## Commands
 
+**Primary (start here):**
+
+| Command | What it does |
+|---------|-------------|
+| `setup` | **One command:** build pack → NEAPs → import to ITSI → probe readiness |
+| `probe` | Live readiness board — health scores, KPI flow, entities, activity log, scenario status |
+| `degrade` | Inject a failure scenario (otel-demo flags / k8s / HEC) with auto-recovery |
+
+**Build your own pack (advanced):**
+
 | Command | Mode | What it does |
 |---------|------|-------------|
 | `diagram` | **AI + Vision** | Analyze an architecture diagram image → full ITSI content pack |
 | `apm` | **AI** | Pull live Splunk O11y service map → classify topology → ITSI pack |
 | `discover` | **AI** | Plain-English architecture description → full ITSI content pack |
 | `enrich` | **AI** | Claude reviews a pack, fills coverage gaps, scores 0–100 |
-| `neap` | **AI + Template** | Generate NEAPs (template) + correlation searches (AI) for any pack |
-| `degrade` | **AI** | Inject a failure scenario (k8s/otel-demo/HEC) with auto-recovery |
-| `probe` | **Live check** | Demo readiness board — health scores, KPI flow, entities, scenario status |
+| `neap` | **AI + Template** | Generate NEAPs (template) + correlation searches (AI); optional `--validate` |
 | `cmdb` | Template + opt. AI | Parse SNOW CMDB export → service tree |
-| `bootstrap` | Template | Demo-ready pack from a pre-built vertical (banking, healthcare, etc.) |
-| `kpi-discover` | Template + opt. AI | Show/generate KPIs for a service type |
+| `bootstrap` | Template | Demo-ready pack from a pre-built vertical |
+| `kpi-discover` | Template | Show recommended KPIs for a service type |
 | `preflight` | **Live check** | Verify Splunk has indexed data ready for ITSI onboarding |
 | `import` | **Live push** | Push a content pack into live ITSI via REST API |
 
@@ -126,6 +156,35 @@ export ITSI_AI_PROVIDER=anthropic   # force Anthropic API
 ```
 
 **Auto-detection order:** `ITSI_AI_PROVIDER` env var → `ANTHROPIC_API_KEY` present → AWS Bedrock fallback
+
+---
+
+## Primary Commands
+
+### `setup` — one command to rule them all
+
+The fastest path from zero to a live ITSI demo. Chains all four steps automatically.
+
+```bash
+# Full setup
+python -m itsi_accelerator setup \
+  --vertical otel-demo \
+  --url https://my-show.splunkcloud.com \
+  --token $SPLUNK_TOKEN
+
+# Build pack only (no ITSI instance yet)
+python -m itsi_accelerator setup --vertical otel-demo --no-import
+```
+
+```
+Step 1/4  Bootstrap   Build content pack from vertical template  (no AI)
+Step 2/4  NEAPs       Generate NEAPs + correlation searches       (Claude)
+Step 3/4  Import      Push pack to ITSI via REST API
+Step 4/4  Probe       Readiness check → verdict + next steps
+```
+
+Skip steps with `--no-neap` or `--no-import`. Pack is always saved to disk (`<vertical>_pack.json`
+by default, or `--save-pack <path>`). Steps 3–4 are skipped automatically if no `--url` is given.
 
 ---
 
@@ -226,14 +285,15 @@ from name + description when `sys_class_name` is missing or generic.
 python -m itsi_accelerator bootstrap --vertical banking --output demo.json
 ```
 
-| Vertical | Business service | Use case |
-|----------|-----------------|----------|
-| `banking` | Retail Banking Platform | FSI banking demos |
-| `healthcare` | Patient Care Platform | Healthcare / payer demos |
-| `retail` | E-Commerce Platform | Retail / CPG demos |
-| `telecom` | Subscriber Platform | Telco / cable demos |
-| `manufacturing` | Smart Factory Platform | Industrial / OT demos |
-| `generic` | 3-Tier Web Application | Generic demo / PoV |
+| Vertical | Business service | Services | Use case |
+|----------|-----------------|----------|----------|
+| `otel-demo` | Astronomy Shop | 15 (astroshop) | OTel Demo app — hardcoded, no AI call |
+| `banking` | Retail Banking Platform | 11 | FSI banking demos |
+| `healthcare` | Patient Care Platform | 11 | Healthcare / payer demos |
+| `retail` | E-Commerce Platform | 12 | Retail / CPG demos |
+| `telecom` | Subscriber Platform | 11 | Telco / cable demos |
+| `manufacturing` | Smart Factory Platform | 10 | Industrial / OT demos |
+| `generic` | 3-Tier Web Application | 9 | Generic demo / PoV |
 
 ---
 
@@ -258,7 +318,17 @@ packaged into a Splunk app alongside the content pack.
 ```bash
 # NEAPs only, skip AI correlation search generation:
 python -m itsi_accelerator neap --pack pack.json --no-correlation-searches
+
+# Dry-run each SPL against a live Splunk instance — flags zero-result searches:
+python -m itsi_accelerator neap --pack pack.json \
+  --validate \
+  --validate-url https://my-show.splunkcloud.com \
+  --validate-token $SPLUNK_TOKEN
 ```
+
+`--validate` runs each generated SPL via `/services/search/jobs/export` and prints a result count
+per search. Zero-result searches are flagged as warnings — the most common cause is an index name
+mismatch. Edit the SPL in the bundle JSON before loading into ITSI.
 
 **Design note:** NEAPs are intentionally template-based — the pattern is predictable and
 encoding it into the framework removes the AI dependency at runtime.
@@ -269,28 +339,31 @@ encoding it into the framework removes the AI dependency at runtime.
 
 ### `degrade` — inject failure scenarios
 
-Claude generates realistic failure scenarios from your content pack (services, CI types, KPIs),
-then executes them with auto-recovery after `--duration` seconds.
+For the OTel Demo vertical, all 5 astroshop feature-flag scenarios are **hardcoded** — no AI call,
+no pack file needed. For custom packs, Claude generates scenarios from your services + KPIs.
 
 ```bash
-# Plan scenarios first (safe dry-run, shows talking points):
-python -m itsi_accelerator degrade --pack pack.json
+# OTel Demo — hardcoded scenarios, instant, no AI:
+python -m itsi_accelerator degrade --vertical otel-demo --target otel-demo
 
-# OTel Demo feature flag injection (cleanest for astroshop):
+# Run a specific scenario (substring match on name):
 python -m itsi_accelerator degrade \
-  --pack pack.json \
-  --target otel-demo \
-  --featureflag-url http://localhost:8013 \
-  --duration 300
+  --vertical otel-demo --target otel-demo \
+  --scenario payment --duration 120
 
-# k8s — scale down / pod delete / CPU stress:
-python -m itsi_accelerator degrade \
-  --pack pack.json \
-  --target k8s \
-  --scenario cascade \
-  --namespace otel-demo \
-  --duration 300
+# Custom pack — Claude generates scenarios:
+python -m itsi_accelerator degrade --pack pack.json --target otel-demo
 ```
+
+**Hardcoded OTel Demo scenarios (no AI, no pack needed):**
+
+| Scenario | Feature flag | Alert in |
+|----------|-------------|----------|
+| Payment Service Failure | `paymentServiceFailure` | ~60s |
+| Recommendation Cache Failure | `recommendationServiceCacheFailure` | ~90s |
+| Cart Service Failure | `cartServiceFailure` | ~45s |
+| Product Catalog Error | `productCatalogServiceError` | ~60s |
+| Shipping Service Failure | `shippingServiceFailure` | ~45s |
 
 **Targets:**
 
@@ -301,12 +374,7 @@ python -m itsi_accelerator degrade \
 | `k8s` | Executes `kubectl` scale/delete/exec commands against your cluster |
 | `hec` | Sends synthetic events to Splunk HEC to trigger correlation searches |
 
-**What Claude generates per scenario:**
-- Inject commands + recovery commands
-- OTel demo feature flag name (if applicable)
-- Expected KPIs that will breach thresholds
-- Estimated time to ITSI alert
-- **Demo talking points** — 3–4 bullets for the SA to narrate while the scenario runs
+Each scenario includes **demo talking points** — 4–5 bullets for the SA to narrate while ITSI reacts.
 
 ---
 
@@ -323,6 +391,9 @@ python -m itsi_accelerator probe \
   --watch
 ```
 
+`--watch` shows a split display: readiness board on top, rolling activity log on the bottom
+(queries `itsi_tracked_alerts` every 15s — notables fired, health changes in real time).
+
 **What it checks:**
 
 | Check | Pass condition |
@@ -336,19 +407,24 @@ python -m itsi_accelerator probe \
 | KPI backfill | All backfill jobs complete |
 | Active scenario | Shows scenario name + countdown if `degrade` is running |
 
-**Example output:**
+**Example output (`--watch`):**
 ```
-╭─ ITSI Demo Readiness [apm_pack.json]  READY ──────────────╮
-│  ✓  Connectivity          Splunk 9.1.2                     │
-│  ✓  Services exist        All 8 services present           │
-│  ✓  Health scores         All 8 services have scores       │
-│  ✓  KPI data flow         142 KPIs computing (last 15m)    │
-│  ✓  Entities              32 entities (8 linked)           │
-│  !  Correlation searches  10/12 enabled                    │
-│  ·  KPI backfill          Not available on this version    │
-│  !  Active scenario       ACTIVE: 'Payment - Down'         │
-│                           1m 43s until auto-recovery       │
-╰─ Score: 87%  |  Checked: 14:32:05  |  Refreshing every 30s ╯
+╭─ ITSI Demo Readiness [otel_demo_pack.json]  READY ─────────╮
+│  ✓  Connectivity          Splunk 9.1.2                      │
+│  ✓  Services exist        All 15 services present           │
+│  ✓  Health scores         All 15 services have scores       │
+│  ✓  KPI data flow         68 KPIs computing (last 15m)      │
+│  ✓  Entities              15 entities (15 linked)           │
+│  ✓  Correlation searches  12 searches enabled               │
+│  ·  KPI backfill          Not available on this version     │
+│  !  Active scenario       ACTIVE: 'Payment Service Failure' │
+│                           1m 43s until auto-recovery        │
+╰─ Score: 93%  |  Checked: 14:32:05  |  Refreshing every 30s ╯
+╭─ Activity Log (itsi_tracked_alerts, last 5m) ───────────────╮
+│  14:31:52  CRIT [Payment Service] payment errors spiking    │
+│  14:31:47  HIGH [Checkout Service] downstream dependency    │
+│  14:30:12  INFO [K8s Cluster] pod restart detected          │
+╰────────────────────────────────────────────────────────────╯
 ```
 
 The probe and degrade commands share a local state file (`~/.itsi_accelerator_state.json`) —
@@ -422,8 +498,8 @@ Services + CI types        ─► Scenario generation                ─► inje
 ```
 
 **Design direction:** AI is used to discover patterns; those patterns get encoded as templates
-over time, removing the runtime AI dependency. NEAPs are already template-based. Vertical-specific
-degradation scenarios and correlation searches are next.
+over time, removing the runtime AI dependency. NEAPs are already template-based. OTel Demo
+degradation scenarios are now hardcoded — `degrade --vertical otel-demo` makes zero AI calls.
 
 ---
 
@@ -438,7 +514,7 @@ itsi-field-accelerator/
 │   │   ├── kpi_generator.py               # Service context → custom KPIs with SPL
 │   │   ├── diagram_analyzer.py            # Vision-based diagram → service tree
 │   │   ├── correlation_search_generator.py # Batched corr search SPL generation
-│   │   ├── scenario_generator.py          # Demo degradation scenario plans
+│   │   ├── scenario_generator.py          # Demo degradation scenario plans (AI path)
 │   │   ├── pack_enricher.py               # Two-step coverage assessment + gap-fill
 │   │   └── cmdb_enricher.py               # Infer CI types for unclassified CIs
 │   ├── apm/
@@ -448,12 +524,13 @@ itsi-field-accelerator/
 │   ├── degrade/
 │   │   └── executor.py                    # inject → wait → recover; writes scenario state file
 │   ├── templates/
-│   │   ├── kpi_library.py                 # 30+ KPI templates, 9 service types
-│   │   ├── verticals.py                   # 6 pre-built vertical bundles
-│   │   └── neap_templates.py              # Template-based NEAP builder (no AI)
+│   │   ├── kpi_library.py                 # 40+ KPI templates, 11 service types
+│   │   ├── verticals.py                   # 7 pre-built verticals (incl. otel-demo)
+│   │   ├── neap_templates.py              # Template-based NEAP builder (no AI)
+│   │   └── scenarios.py                   # Hardcoded degrade scenarios by vertical (otel-demo)
 │   ├── cmdb/parser.py                     # SNOW CSV/JSON → ContentPack
 │   ├── preflight/checker.py               # Splunk data readiness (5 checks, scored)
-│   ├── cli/main.py                        # All 12 CLI commands (click + rich)
+│   ├── cli/main.py                        # All 13 CLI commands (click + rich)
 │   └── core/
 │       ├── models.py                      # Service, KPI, Entity, CorrelationSearch, NEAP, ContentPack
 │       └── importer.py                    # ITSI REST API importer
@@ -474,9 +551,10 @@ itsi-field-accelerator/
 | AI-generated SPL | Yes (from indexed data) | **Yes** (from description + context) |
 | AWS Bedrock as AI backend | No | **Yes** |
 | Entities auto-generated | Yes | **Yes** |
-| NEAP + correlation search generation | No | **Yes** (`neap`) |
-| Demo degradation scenarios | No | **Yes** (`degrade`) |
-| Demo readiness board | No | **Yes** (`probe`) |
+| NEAP + correlation search generation | No | **Yes** (`neap`, also via `setup`) |
+| Demo degradation scenarios | No | **Yes** (`degrade` — hardcoded for otel-demo) |
+| Demo readiness board + activity log | No | **Yes** (`probe --watch`) |
+| One-command end-to-end setup | No | **Yes** (`setup`) |
 | Coverage scoring | No | **Yes** (0–100) |
 | Pack gap analysis + enrichment | No | **Yes** (`enrich`) |
 

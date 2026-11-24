@@ -14,9 +14,30 @@ from __future__ import annotations
 import json
 import subprocess
 import time
+from pathlib import Path
 from typing import Any
 
 import requests
+
+# Shared state file — read by probe checker
+SCENARIO_STATE_FILE = Path.home() / ".itsi_accelerator_state.json"
+
+
+def _write_state(scenario: dict, duration: int) -> None:
+    state = {
+        "active": True,
+        "scenario_name": scenario.get("name", ""),
+        "service_name": scenario.get("service_name", ""),
+        "failure_type": scenario.get("failure_type", ""),
+        "injected_at": time.time(),
+        "recover_at": time.time() + duration,
+    }
+    SCENARIO_STATE_FILE.write_text(json.dumps(state, indent=2))
+
+
+def _clear_state() -> None:
+    state = {"active": False}
+    SCENARIO_STATE_FILE.write_text(json.dumps(state))
 
 
 # ── kubectl helpers ───────────────────────────────────────────────────────────
@@ -144,6 +165,8 @@ def run_scenario(
             print_fn(f"  • {point}")
 
     # ── INJECT ────────────────────────────────────────────────────────────────
+    if not dry_run:
+        _write_state(scenario, duration)
     print_fn("\n[cyan]--- INJECT ---[/]")
     inject_ok = True
 
@@ -223,6 +246,8 @@ def run_scenario(
         if not ok:
             recover_ok = False
 
+    if not dry_run:
+        _clear_state()
     status = "[green]Recovery complete[/]" if recover_ok else "[yellow]Recovery had errors — manual cleanup may be needed[/]"
     print_fn(f"\n{status}")
     return inject_ok and recover_ok

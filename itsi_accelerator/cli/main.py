@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from pathlib import Path
 
 import click
@@ -225,6 +226,107 @@ def kpi_discover(service_type, index, output, ai, description):
     if output:
         Path(output).write_text(json.dumps(kpis, indent=2))
         console.print(f"Saved to [cyan]{output}[/]")
+
+
+# ── probe ─────────────────────────────────────────────────────────────────────
+
+@cli.command()
+@click.option("--url", "-u", required=True, help="Splunk/ITSI base URL, e.g. https://my-show.splunkcloud.com")
+@click.option("--token", "-t", required=True, envvar="SPLUNK_TOKEN", help="Splunk auth token (env: SPLUNK_TOKEN)")
+@click.option("--pack", "-p", default=None, help="Content pack JSON to cross-reference service names (optional)")
+@click.option("--output", "-o", default=None, help="Save report JSON to this path")
+@click.option("--no-ssl-verify", is_flag=True, default=False)
+@click.option("--watch", "-w", is_flag=True, default=False,
+              help="Continuously refresh the readiness board every 30s (Ctrl+C to stop)")
+@click.option("--interval", default=30, show_default=True,
+              help="Refresh interval in seconds (used with --watch)")
+def probe(url, token, pack, output, no_ssl_verify, watch, interval):
+    """
+    Check ITSI demo readiness against a live instance.
+
+    Verifies that services, health scores, KPI data, entities, and correlation
+    searches are all active. Shows active degrade scenario status and remaining
+    time. Use --watch for a live-refreshing readiness board.
+
+    Example:
+      python -m itsi_accelerator probe \\
+        --url https://my-show.splunkcloud.com \\
+        --token $SPLUNK_TOKEN \\
+        --pack apm_pack.json --watch
+    """
+    from itsi_accelerator.probe.checker import ProbeChecker
+    from rich.live import Live
+    from rich.table import Table as RichTable
+    from rich.panel import Panel as RichPanel
+    from rich.text import Text
+    import datetime
+
+    pack_dict: dict = {}
+    if pack:
+        try:
+            pack_dict = json.loads(Path(pack).read_text())
+        except Exception as e:
+            console.print(f"[yellow]Warning: could not load pack '{pack}': {e}[/]")
+
+    checker = ProbeChecker(
+        url=url,
+        token=token,
+        pack_dict=pack_dict,
+        verify_ssl=not no_ssl_verify,
+    )
+
+    def _build_display(report) -> RichPanel:
+        """Render the readiness board as a Rich panel."""
+        table = RichTable(show_header=False, show_edge=False, box=None, padding=(0, 1))
+        table.add_column("icon", width=3)
+        table.add_column("check", style="bold", min_width=24)
+        table.add_column("message")
+        table.add_column("detail", style="dim")
+
+        for check in report.checks:
+            icon_txt = Text(check.icon, style=check.color)
+            table.add_row(
+                icon_txt,
+                check.name,
+                Text(check.message, style=check.color if check.status in ("fail", "warn") else ""),
+                check.detail,
+            )
+
+        ts = datetime.datetime.fromtimestamp(report.checked_at).strftime("%H:%M:%S")
+        footer = f"Score: {report.score}%  |  Checked: {ts}"
+        if watch:
+            footer += f"  |  Refreshing every {interval}s  (Ctrl+C to stop)"
+
+        verdict_text = Text(f" {report.verdict} ", style=f"bold white on {report.verdict_color}")
+        title = Text.assemble("ITSI Demo Readiness  ", verdict_text)
+        if pack:
+            title = Text.assemble(f"ITSI Demo Readiness [{Path(pack).name}]  ", verdict_text)
+
+        return RichPanel(table, title=title, subtitle=footer)
+
+    if not watch:
+        with console.status("[cyan]Probing ITSI...[/]"):
+            report = checker.run()
+        console.print(_build_display(report))
+        if output:
+            Path(output).write_text(json.dumps(report.to_dict(), indent=2))
+            console.print(f"Report saved to [cyan]{output}[/]")
+        if not report.ready:
+            sys.exit(1)
+        return
+
+    # ── Watch mode: live-refreshing board ─────────────────────────────────────
+    report = checker.run()
+    with Live(_build_display(report), console=console, refresh_per_second=4, screen=False) as live:
+        try:
+            while True:
+                for _ in range(interval * 10):   # sleep in 0.1s ticks so Ctrl+C is responsive
+                    time.sleep(0.1)
+                report = checker.run()
+                live.update(_build_display(report))
+        except KeyboardInterrupt:
+            pass
+    console.print("[dim]Watch stopped.[/]")
 
 
 # ── preflight ─────────────────────────────────────────────────────────────────

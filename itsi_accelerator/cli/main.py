@@ -19,7 +19,20 @@ console = Console()
 @click.group()
 @click.version_option("0.3.0")
 def cli():
-    """ITSI Field Accelerator — fast-track ITSI onboarding from CMDB data, vertical templates, APM topology, or plain-English descriptions."""
+    """ITSI Field Accelerator — fast-track ITSI demo setup and degradation testing.
+
+    \b
+    QUICK START (OTel Demo):
+      setup    One command: build pack → NEAPs → import → probe
+      degrade  Inject a failure scenario during the demo
+      probe    Live readiness board (use --watch)
+
+    \b
+    ADVANCED (build your own pack):
+      bootstrap / cmdb / apm / diagram / discover → build a pack
+      neap                                        → add NEAPs + correlation searches
+      import                                      → push pack to ITSI
+    """
     pass
 
 
@@ -52,6 +65,195 @@ def cmdb(input, output, title, index, ai_infer):
 
     console.print(f"[bold green]Done.[/] {len(pack.services)} services -> {output}")
     _print_service_table(pack)
+
+
+# ── setup (meta-command: bootstrap → neap → import → probe) ──────────────────
+
+@cli.command()
+@click.option("--vertical", "-v", required=True,
+              help="Vertical template to use: otel-demo, banking, healthcare, retail, telecom, manufacturing, generic")
+@click.option("--url", "-u", default="", envvar="SPLUNK_URL",
+              help="Splunk/ITSI base URL (env: SPLUNK_URL). Omit to skip import + probe.")
+@click.option("--token", "-t", default="", envvar="SPLUNK_TOKEN",
+              help="Splunk auth token (env: SPLUNK_TOKEN). Required for import + probe.")
+@click.option("--index", default="main", show_default=True,
+              help="Splunk index for KPI SPL templates")
+@click.option("--save-pack", default=None,
+              help="Save the generated content pack JSON to this path (default: <vertical>_pack.json)")
+@click.option("--no-import", is_flag=True, default=False,
+              help="Skip the ITSI import step (useful when no ITSI instance is available yet)")
+@click.option("--no-neap", is_flag=True, default=False,
+              help="Skip NEAP + correlation search generation")
+@click.option("--no-ssl-verify", is_flag=True, default=False)
+def setup(vertical, url, token, index, save_pack, no_import, no_neap, no_ssl_verify):
+    """
+    One command: build content pack → NEAPs → import to ITSI → probe readiness.
+
+    The fastest path from zero to a live ITSI demo. Provide a vertical name and
+    your Splunk credentials — setup handles the rest.
+
+    \b
+    Examples:
+      # Full setup (OTel Demo)
+      itsi-accelerator setup --vertical otel-demo \\
+        --url https://my-show.splunkcloud.com --token $SPLUNK_TOKEN
+
+      # Build pack only (no ITSI instance yet)
+      itsi-accelerator setup --vertical otel-demo --no-import
+
+      # Save pack to a specific path
+      itsi-accelerator setup --vertical otel-demo \\
+        --url https://my-show.splunkcloud.com --token $SPLUNK_TOKEN \\
+        --save-pack ~/demo/astroshop_pack.json
+    """
+    import requests as req
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+    from itsi_accelerator.templates.verticals import get_vertical
+    from itsi_accelerator.cmdb.parser import CMDBParser
+    from itsi_accelerator.core.models import Service, EntityRule, CorrelationSearch
+    from itsi_accelerator.templates.neap_templates import build_neaps
+
+    needs_itsi = not no_import and bool(url and token)
+
+    console.print(Panel(
+        f"[bold]Vertical:[/] {vertical}\n"
+        f"[bold]Index:[/] {index}\n"
+        f"[bold]ITSI import:[/] {'yes — ' + url if needs_itsi else '[dim]skipped[/]'}\n"
+        f"[bold]NEAPs:[/] {'yes' if not no_neap else '[dim]skipped[/]'}",
+        title="[bold cyan]ITSI Field Accelerator — Setup[/]",
+    ))
+
+    # ── Step 1: Bootstrap ──────────────────────────────────────────────────────
+    console.print("\n[bold cyan]Step 1/4[/] [bold]Bootstrap content pack[/]")
+    try:
+        rows = get_vertical(vertical)
+    except ValueError as e:
+        console.print(f"[red]Error:[/] {e}")
+        sys.exit(1)
+
+    parser = CMDBParser(index=index)
+    pack = parser.build_content_pack(rows, pack_title=f"{vertical.title()} Demo Pack")
+    pack_dict = pack.to_dict()
+
+    pack_path = Path(save_pack) if save_pack else Path(f"{vertical.replace('-', '_')}_pack.json")
+    pack_path.write_text(json.dumps(pack_dict, indent=2))
+    console.print(f"  [green]✓[/] {len(pack.services)} services  →  {pack_path}")
+
+    # ── Step 2: NEAPs + correlation searches ───────────────────────────────────
+    neap_objects = []
+    cs_objects: list[CorrelationSearch] = []
+    if not no_neap:
+        console.print("\n[bold cyan]Step 2/4[/] [bold]Generate NEAPs + correlation searches[/]")
+        services_raw = pack_dict.get("data", {}).get("services", [])
+
+        # Build service stubs for NEAP builder
+        svc_stubs = []
+        for s in services_raw:
+            stub = Service(title=s["title"], description=s.get("description", ""))
+            stub._key = s["_key"]
+            stub.services_depends_on = s.get("services_depends_on", [])
+            svc_stubs.append(stub)
+
+        neap_objects = build_neaps(svc_stubs)
+        console.print(f"  [green]✓[/] {len(neap_objects)} NEAPs (template-based)")
+
+        # Correlation searches via Claude
+        from itsi_accelerator.ai.correlation_search_generator import generate_correlation_searches
+        services_summary = []
+        for s in services_raw:
+            kpis = [k for k in s.get("kpis", []) if k.get("title") != "ServiceHealthScore"]
+            services_summary.append({
+                "name": s["title"],
+                "description": s.get("description", ""),
+                "ci_type": _infer_ci_type_from_tags(s.get("tags", [])),
+                "sla_critical": "sla-critical" in " ".join(s.get("tags", [])).lower(),
+                "kpis": kpis[:4],
+            })
+
+        with console.status("  [dim]Claude is generating correlation searches...[/]"):
+            cs_dicts = generate_correlation_searches(services=services_summary, index=index)
+
+        name_to_key = {s["title"]: s["_key"] for s in services_raw}
+        for cs_dict in cs_dicts:
+            svc_key = name_to_key.get(cs_dict.get("service_name", ""), "")
+            cs_objects.append(CorrelationSearch(
+                name=cs_dict["name"],
+                description=cs_dict.get("description", ""),
+                search=cs_dict["search"],
+                service_key=svc_key,
+                severity=cs_dict.get("severity", "medium"),
+                alert_title=cs_dict.get("alert_title", cs_dict["name"]),
+                cron_schedule=cs_dict.get("cron_schedule", "*/5 * * * *"),
+            ))
+        console.print(f"  [green]✓[/] {len(cs_objects)} correlation searches")
+
+        neap_bundle = {
+            "title": pack_dict.get("title", vertical),
+            "_pack_key": pack_dict.get("_key", ""),
+            "correlation_searches": [cs.to_dict() for cs in cs_objects],
+            "notable_event_aggregation_policies": [n.to_dict() for n in neap_objects],
+        }
+        neap_path = pack_path.with_name(pack_path.stem + "_neap_bundle.json")
+        neap_path.write_text(json.dumps(neap_bundle, indent=2))
+        console.print(f"  [green]✓[/] NEAP bundle  →  {neap_path}")
+    else:
+        console.print("\n[bold cyan]Step 2/4[/] [dim]NEAPs skipped (--no-neap)[/]")
+
+    # ── Step 3: Import to ITSI ─────────────────────────────────────────────────
+    if needs_itsi:
+        console.print("\n[bold cyan]Step 3/4[/] [bold]Import content pack to ITSI[/]")
+        session = req.Session()
+        session.verify = not no_ssl_verify
+        session.headers.update({"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+        try:
+            resp = session.post(
+                f"{url.rstrip('/')}/servicesNS/nobody/SA-ITOA/itsi/content_packs/import",
+                data=json.dumps({"content_pack": pack_dict, "overwrite": False}),
+                timeout=60,
+            )
+            resp.raise_for_status()
+            console.print(f"  [green]✓[/] Content pack imported to {url}")
+        except Exception as e:
+            console.print(f"  [yellow]![/] Import failed: {e}")
+            console.print("  [dim]You can retry with: itsi-accelerator import --pack " + str(pack_path) + " --url <url> --token <token>[/]")
+    else:
+        console.print("\n[bold cyan]Step 3/4[/] [dim]Import skipped (--no-import or no --url/--token)[/]")
+        console.print(f"  [dim]When ready: itsi-accelerator import --pack {pack_path} --url <url> --token <token>[/]")
+
+    # ── Step 4: Probe ──────────────────────────────────────────────────────────
+    if needs_itsi:
+        console.print("\n[bold cyan]Step 4/4[/] [bold]Probe ITSI readiness[/]")
+        from itsi_accelerator.probe.checker import ProbeChecker
+        from rich.text import Text
+        import datetime
+
+        checker = ProbeChecker(url=url, token=token, pack_dict=pack_dict, verify_ssl=not no_ssl_verify)
+        with console.status("  [dim]Checking ITSI...[/]"):
+            report = checker.run()
+
+        for check in report.checks:
+            icon = Text(check.icon, style=check.color)
+            console.print(Text.assemble("  ", icon, " ", Text(check.name + ": ", style="bold"), check.message))
+
+        verdict_style = f"bold white on {report.verdict_color}"
+        console.print(f"\n  Score: {report.score}%  Verdict: ", end="")
+        console.print(Text(f" {report.verdict} ", style=verdict_style))
+
+        if report.verdict == "READY":
+            console.print(f"\n[bold green]Setup complete.[/] Your demo is ready.")
+            console.print(f"  [dim]Monitor with:[/] itsi-accelerator probe --url {url} --token <token> --pack {pack_path} --watch")
+            console.print(f"  [dim]Break things:[/] itsi-accelerator degrade --vertical {vertical} --target otel-demo")
+        else:
+            console.print(f"\n[yellow]Setup complete — but probe shows issues.[/] Check the results above.")
+            console.print(f"  [dim]Re-check with:[/] itsi-accelerator probe --url {url} --token <token> --pack {pack_path}")
+    else:
+        console.print("\n[bold cyan]Step 4/4[/] [dim]Probe skipped (no --url/--token)[/]")
+        console.print(f"\n[bold green]Pack ready.[/] Next steps:")
+        console.print(f"  1. Import:   itsi-accelerator import --pack {pack_path} --url <url> --token <token>")
+        console.print(f"  2. Verify:   itsi-accelerator probe  --url <url> --token <token> --pack {pack_path} --watch")
+        console.print(f"  3. Demo:     itsi-accelerator degrade --vertical {vertical} --target otel-demo")
 
 
 # ── bootstrap ─────────────────────────────────────────────────────────────────

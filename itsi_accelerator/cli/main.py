@@ -399,7 +399,7 @@ def probe(url, token, pack, output, no_ssl_verify, watch, interval):
     # ── Watch mode: live-refreshing board with activity log ────────────────────
     report = checker.run()
     _fetch_activity()
-    with Live(_build_display(report), console=console, refresh_per_second=4, screen=True) as live:
+    with Live(_build_display(report), console=console, refresh_per_second=4, screen=False) as live:
         try:
             tick = 0
             while True:
@@ -622,7 +622,7 @@ def diagram(image, context, output, index, ai_kpis):
 # ── degrade ───────────────────────────────────────────────────────────────────
 
 @cli.command()
-@click.option("--pack", "-p", required=True, help="Content pack JSON — used to know what services exist")
+@click.option("--pack", "-p", default=None, help="Content pack JSON — used to know what services exist. Optional when --vertical is specified.")
 @click.option("--scenario", "-s", default=None,
               help="Scenario name to run (substring match). Omit to list all and choose interactively.")
 @click.option("--target", default="simulate", show_default=True,
@@ -677,17 +677,20 @@ def degrade(pack, scenario, target, duration, namespace, kubeconfig, hec_url, he
     from itsi_accelerator.degrade.executor import run_scenario
     from itsi_accelerator.templates.scenarios import get_scenarios_for_vertical, list_scenario_verticals
 
-    pack_dict = json.loads(Path(pack).read_text())
-    services_raw = pack_dict.get("data", {}).get("services", [])
-    if not services_raw:
-        console.print("[red]No services found in pack.[/]")
+    # --pack is optional when --vertical is specified (pre-built scenarios don't need a pack)
+    pack_dict: dict = {}
+    services_raw: list = []
+    if pack:
+        pack_dict = json.loads(Path(pack).read_text())
+        services_raw = pack_dict.get("data", {}).get("services", [])
+    elif not vertical:
+        console.print("[red]--pack is required unless --vertical is specified.[/]")
         sys.exit(1)
 
     console.print(Panel(
-        f"[bold]Pack:[/] {pack_dict.get('title', pack)}\n"
-        f"[bold]Services:[/] {len(services_raw)}\n"
-        f"[bold]Target:[/] {target}\n"
-        f"[bold]Duration:[/] {duration}s"
+        (f"[bold]Pack:[/] {pack_dict.get('title', pack)}\n" if pack else "")
+        + f"[bold]Target:[/] {target}\n"
+        + f"[bold]Duration:[/] {duration}s"
         + (f"\n[bold]Vertical:[/] {vertical} [dim](pre-built scenarios)[/]" if vertical else ""),
         title="[cyan]ITSI Degradation Scenarios[/]",
     ))
@@ -736,14 +739,15 @@ def degrade(pack, scenario, target, duration, namespace, kubeconfig, hec_url, he
     table.add_column("Severity", style="yellow")
     table.add_column("Alert in")
     for i, sc in enumerate(scenarios, 1):
-        sev_color = "red" if sc["severity"] == "critical" else "yellow" if sc["severity"] == "high" else "white"
+        sev = sc.get("severity", "medium")
+        sev_color = "red" if sev == "critical" else "yellow" if sev == "high" else "white"
         table.add_row(
             str(i),
             sc["name"],
-            sc["service_name"],
-            sc["failure_type"],
-            f"[{sev_color}]{sc['severity']}[/]",
-            f"~{sc['time_to_alert_seconds']}s",
+            sc.get("service_name", ""),
+            sc.get("failure_type", ""),
+            f"[{sev_color}]{sev}[/]",
+            f"~{sc.get('time_to_alert_seconds', '?')}s",
         )
     console.print(table)
 

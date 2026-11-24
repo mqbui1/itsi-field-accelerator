@@ -355,6 +355,94 @@ KPI_TEMPLATES: dict[str, list[dict]] = {
         },
     ],
 
+    # ── OTel-native service (span-based KPIs via O11y APM index) ──────────
+    "otel_service": [
+        {
+            "title": "Error Rate (%)",
+            "base_search": (
+                'index={index} {host_filter} span.kind=server OR span.kind=consumer '
+                '| eval is_error=if(otel.status_code="ERROR" OR http.status_code>=500,1,0) '
+                '| stats count as total, sum(is_error) as errors by service.name '
+                '| eval error_pct=round(errors/total*100,2)'
+            ),
+            "metric": "error_pct",
+            "unit": "%",
+            "aggregate_statop": "avg",
+            "description": "Percentage of spans with error status",
+            "thresholds": {"yellow": 1, "red": 5},
+        },
+        {
+            "title": "P95 Latency (ms)",
+            "base_search": (
+                'index={index} {host_filter} span.kind=server OR span.kind=consumer '
+                '| eval duration_ms=duration/1000000 '
+                '| stats p95(duration_ms) as p95_latency by service.name'
+            ),
+            "metric": "p95_latency",
+            "unit": "ms",
+            "aggregate_statop": "avg",
+            "description": "95th-percentile end-to-end span duration",
+            "thresholds": {"yellow": 1000, "red": 3000},
+        },
+        {
+            "title": "Request Rate (req/min)",
+            "base_search": (
+                'index={index} {host_filter} span.kind=server '
+                '| bucket span=1m _time '
+                '| stats count as requests by _time, service.name '
+                '| stats avg(requests) as avg_rpm by service.name'
+            ),
+            "metric": "avg_rpm",
+            "unit": "req/min",
+            "aggregate_statop": "avg",
+            "description": "Average inbound request rate",
+            "thresholds": {"yellow": None, "red": None},
+        },
+    ],
+
+    # ── Cache / Redis ──────────────────────────────────────────────────────
+    "cache": [
+        {
+            "title": "Cache Hit Rate (%)",
+            "base_search": (
+                'index={index} {host_filter} metric_name=redis.hits OR metric_name=redis.misses '
+                '| eval hits=if(metric_name="redis.hits",metric_value,0) '
+                '| eval misses=if(metric_name="redis.misses",metric_value,0) '
+                '| stats sum(hits) as total_hits, sum(misses) as total_misses by host '
+                '| eval hit_rate=round(total_hits/(total_hits+total_misses)*100,2)'
+            ),
+            "metric": "hit_rate",
+            "unit": "%",
+            "aggregate_statop": "avg",
+            "description": "Redis cache hit percentage",
+            "thresholds": {"yellow": 80, "red": 60},
+        },
+        {
+            "title": "Memory Utilization (%)",
+            "base_search": (
+                'index={index} {host_filter} metric_name=redis.memory.used_pct '
+                '| stats avg(metric_value) as mem_pct by host'
+            ),
+            "metric": "mem_pct",
+            "unit": "%",
+            "aggregate_statop": "avg",
+            "description": "Redis used memory vs maxmemory",
+            "thresholds": {"yellow": 75, "red": 90},
+        },
+        {
+            "title": "Connected Clients",
+            "base_search": (
+                'index={index} {host_filter} metric_name=redis.clients.connected '
+                '| stats avg(metric_value) as connected_clients by host'
+            ),
+            "metric": "connected_clients",
+            "unit": "clients",
+            "aggregate_statop": "avg",
+            "description": "Number of active client connections",
+            "thresholds": {"yellow": 500, "red": 1000},
+        },
+    ],
+
     # ── Identity / Auth ────────────────────────────────────────────────────
     "auth_service": [
         {
@@ -409,6 +497,10 @@ CI_CLASS_ALIASES: dict[str, str] = {
     "payment": "payment_processor",
     "fraud": "fraud_detection",
     "auth": "auth_service",
+    "otel": "otel_service",
+    "microservice": "otel_service",
+    "redis": "cache",
+    "memcached": "cache",
 }
 
 

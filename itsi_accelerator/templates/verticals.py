@@ -102,6 +102,38 @@ VERTICALS: dict[str, list[dict]] = {
         {"name": "Factory Servers", "ci_class": "linux_host", "parent": "MES Core Service", "business_service": "Smart Factory Platform", "description": "On-premise factory servers"},
     ],
 
+    # ── OpenTelemetry Demo (Astronomy Shop / astroshop) ───────────────────
+    # Hardcoded — no AI call needed. All services are fixed in the OTel Demo app.
+    # Feature flags map 1:1 to scenarios in scenarios.py.
+    "otel-demo": [
+        # Root business service
+        {"name": "Astronomy Shop", "ci_class": "cmdb_ci_service", "parent": "", "business_service": "Astronomy Shop", "description": "OpenTelemetry Demo — Astronomy Shop e-commerce platform"},
+
+        # Frontend tier
+        {"name": "Frontend", "ci_class": "otel_service", "parent": "Astronomy Shop", "business_service": "Astronomy Shop", "description": "React storefront served via Next.js"},
+        {"name": "Frontend Proxy (Envoy)", "ci_class": "api_gateway", "parent": "Astronomy Shop", "business_service": "Astronomy Shop", "description": "Envoy-based reverse proxy and API gateway"},
+
+        # Core commerce services
+        {"name": "Checkout Service", "ci_class": "otel_service", "parent": "Astronomy Shop", "business_service": "Astronomy Shop", "description": "Orchestrates checkout flow across downstream services"},
+        {"name": "Payment Service", "ci_class": "payment_processor", "parent": "Checkout Service", "business_service": "Astronomy Shop", "description": "Credit card charge processing — Node.js"},
+        {"name": "Cart Service", "ci_class": "otel_service", "parent": "Checkout Service", "business_service": "Astronomy Shop", "description": "Shopping cart backed by Redis — .NET"},
+        {"name": "Product Catalog Service", "ci_class": "otel_service", "parent": "Checkout Service", "business_service": "Astronomy Shop", "description": "Product listing and details — Go"},
+        {"name": "Currency Service", "ci_class": "otel_service", "parent": "Checkout Service", "business_service": "Astronomy Shop", "description": "Currency conversion — C++"},
+        {"name": "Shipping Service", "ci_class": "otel_service", "parent": "Checkout Service", "business_service": "Astronomy Shop", "description": "Shipping quote and dispatch — Rust"},
+        {"name": "Email Service", "ci_class": "otel_service", "parent": "Checkout Service", "business_service": "Astronomy Shop", "description": "Order confirmation email — Python"},
+
+        # Discovery / recommendation
+        {"name": "Recommendation Service", "ci_class": "otel_service", "parent": "Astronomy Shop", "business_service": "Astronomy Shop", "description": "Product recommendations — Python"},
+        {"name": "Ad Service", "ci_class": "otel_service", "parent": "Astronomy Shop", "business_service": "Astronomy Shop", "description": "Contextual ad serving — Java"},
+
+        # Async / infra
+        {"name": "Kafka", "ci_class": "message_queue", "parent": "Astronomy Shop", "business_service": "Astronomy Shop", "description": "Order event streaming backbone"},
+        {"name": "Cart Redis", "ci_class": "cache", "parent": "Cart Service", "business_service": "Astronomy Shop", "description": "Redis backing store for cart sessions"},
+
+        # Kubernetes platform
+        {"name": "K8s Cluster", "ci_class": "kubernetes", "parent": "Astronomy Shop", "business_service": "Astronomy Shop", "description": "Kubernetes cluster hosting all astroshop pods"},
+    ],
+
     "generic": [
         {"name": "Application Platform", "ci_class": "cmdb_ci_service", "parent": "", "business_service": "Application Platform", "description": "3-tier web application"},
 

@@ -57,7 +57,7 @@ def cmdb(input, output, title, index, ai_infer):
 # ── bootstrap ─────────────────────────────────────────────────────────────────
 
 @cli.command()
-@click.option("--vertical", "-v", required=True, help="Vertical: banking, healthcare, retail, telecom, manufacturing, generic")
+@click.option("--vertical", "-v", required=True, help="Vertical: banking, healthcare, retail, telecom, manufacturing, otel-demo, generic")
 @click.option("--output", "-o", default="demo_content_pack.json", show_default=True)
 @click.option("--index", default="main", show_default=True)
 def bootstrap(vertical, output, index):
@@ -256,10 +256,14 @@ def probe(url, token, pack, output, no_ssl_verify, watch, interval):
     """
     from itsi_accelerator.probe.checker import ProbeChecker
     from rich.live import Live
+    from rich.layout import Layout
     from rich.table import Table as RichTable
     from rich.panel import Panel as RichPanel
     from rich.text import Text
     import datetime
+    import requests
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
     pack_dict: dict = {}
     if pack:
@@ -275,7 +279,63 @@ def probe(url, token, pack, output, no_ssl_verify, watch, interval):
         verify_ssl=not no_ssl_verify,
     )
 
-    def _build_display(report) -> RichPanel:
+    # Shared session for activity log queries
+    _session = requests.Session()
+    _session.verify = not no_ssl_verify
+    _session.headers.update({"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+
+    _activity_log: list[tuple[str, str, str]] = []  # (timestamp_str, severity_color, message)
+    _MAX_LOG_LINES = 20
+
+    def _fetch_activity() -> None:
+        """Query itsi_tracked_alerts for recent notables and append new entries to activity log."""
+        try:
+            resp = _session.post(
+                f"{url.rstrip('/')}/services/search/jobs/export",
+                data={
+                    "search": (
+                        "search index=itsi_tracked_alerts earliest=-5m "
+                        "| eval ts=strftime(_time,'%H:%M:%S') "
+                        "| eval sev=coalesce(severity_label,severity,'info') "
+                        "| eval svc=coalesce(itsi_service_name,source,'unknown') "
+                        "| eval msg=coalesce(alert_description,title,event_title,'event') "
+                        "| table ts, sev, svc, msg "
+                        "| sort -_time | head 10"
+                    ),
+                    "output_mode": "json",
+                    "earliest_time": "-5m",
+                    "latest_time": "now",
+                    "count": 10,
+                },
+                timeout=10,
+            )
+            new_entries = []
+            for line in resp.text.strip().splitlines():
+                try:
+                    obj = json.loads(line)
+                    r = obj.get("result")
+                    if r:
+                        ts = r.get("ts", "?")
+                        sev = r.get("sev", "info").lower()
+                        svc = r.get("svc", "")
+                        msg = r.get("msg", "")
+                        sev_color = "red" if "critical" in sev else "yellow" if "high" in sev or "warn" in sev else "cyan"
+                        label = f"[{sev_color}]{sev.upper()[:4]}[/]"
+                        entry = (ts, sev_color, f"{label} [{svc}] {msg}")
+                        # Deduplicate by message content (same ts+msg already in log)
+                        if not any(e[2] == entry[2] for e in _activity_log):
+                            new_entries.append(entry)
+                except json.JSONDecodeError:
+                    pass
+            if new_entries:
+                _activity_log.extend(new_entries)
+                # Keep only the most recent MAX_LOG_LINES entries
+                while len(_activity_log) > _MAX_LOG_LINES:
+                    _activity_log.pop(0)
+        except Exception:
+            pass  # Activity log is best-effort; don't break probe on query failure
+
+    def _build_readiness_panel(report) -> RichPanel:
         """Render the readiness board as a Rich panel."""
         table = RichTable(show_header=False, show_edge=False, box=None, padding=(0, 1))
         table.add_column("icon", width=3)
@@ -304,10 +364,31 @@ def probe(url, token, pack, output, no_ssl_verify, watch, interval):
 
         return RichPanel(table, title=title, subtitle=footer)
 
+    def _build_activity_panel() -> RichPanel:
+        """Render the rolling activity log as a Rich panel."""
+        lines = Text()
+        if not _activity_log:
+            lines.append("No ITSI events in last 5 minutes.", style="dim")
+        else:
+            for ts, _, msg in reversed(_activity_log[-_MAX_LOG_LINES:]):
+                lines.append(f"{ts}  ", style="dim")
+                lines.append_text(Text.from_markup(msg))
+                lines.append("\n")
+        return RichPanel(lines, title="[bold cyan]Activity Log[/] [dim](itsi_tracked_alerts, last 5m)[/]")
+
+    def _build_display(report) -> Layout:
+        """Build a two-panel layout: readiness board on top, activity log on bottom."""
+        layout = Layout()
+        layout.split_column(
+            Layout(_build_readiness_panel(report), name="readiness", ratio=2),
+            Layout(_build_activity_panel(), name="activity", ratio=1),
+        )
+        return layout
+
     if not watch:
         with console.status("[cyan]Probing ITSI...[/]"):
             report = checker.run()
-        console.print(_build_display(report))
+        console.print(_build_readiness_panel(report))
         if output:
             Path(output).write_text(json.dumps(report.to_dict(), indent=2))
             console.print(f"Report saved to [cyan]{output}[/]")
@@ -315,14 +396,21 @@ def probe(url, token, pack, output, no_ssl_verify, watch, interval):
             sys.exit(1)
         return
 
-    # ── Watch mode: live-refreshing board ─────────────────────────────────────
+    # ── Watch mode: live-refreshing board with activity log ────────────────────
     report = checker.run()
-    with Live(_build_display(report), console=console, refresh_per_second=4, screen=False) as live:
+    _fetch_activity()
+    with Live(_build_display(report), console=console, refresh_per_second=4, screen=True) as live:
         try:
+            tick = 0
             while True:
-                for _ in range(interval * 10):   # sleep in 0.1s ticks so Ctrl+C is responsive
-                    time.sleep(0.1)
-                report = checker.run()
+                time.sleep(0.1)
+                tick += 1
+                # Refresh readiness checks every `interval` seconds
+                if tick % (interval * 10) == 0:
+                    report = checker.run()
+                # Refresh activity log every 15s (more frequent than probe checks)
+                if tick % 150 == 0:
+                    _fetch_activity()
                 live.update(_build_display(report))
         except KeyboardInterrupt:
             pass
@@ -549,19 +637,20 @@ def diagram(image, context, output, index, ai_kpis):
               help="Splunk HEC token (env: SPLUNK_HEC_TOKEN)")
 @click.option("--featureflag-url", default="http://localhost:8013", show_default=True,
               help="OTel Demo feature flag service URL (used with --target otel-demo)")
+@click.option("--vertical", default=None,
+              help="Use pre-built scenarios for a known vertical (e.g. otel-demo). Skips Claude.")
 @click.option("--context", "-c", default="",
               help="Additional context for Claude scenario generation (app name, stack, industry)")
 @click.option("--all", "run_all", is_flag=True, default=False,
               help="Run all generated scenarios sequentially")
 @click.option("--index", default="main", show_default=True, help="Splunk index (used in HEC events)")
 def degrade(pack, scenario, target, duration, namespace, kubeconfig, hec_url, hec_token,
-            featureflag_url, context, run_all, index):
+            featureflag_url, vertical, context, run_all, index):
     """
     Inject a degradation scenario and auto-recover after --duration seconds.
 
-    Claude generates realistic failure scenarios from your content pack (which services
-    exist, what KPIs they have). You pick one to run. The command injects the failure,
-    holds it, then recovers — giving the demo audience enough time to see ITSI react.
+    By default Claude generates realistic failure scenarios from your content pack.
+    Use --vertical otel-demo to skip the AI call and use hardcoded astroshop scenarios.
 
     Safe by default: --target simulate (dry-run) prints what WOULD happen without
     touching anything.
@@ -573,19 +662,20 @@ def degrade(pack, scenario, target, duration, namespace, kubeconfig, hec_url, he
       hec        — sends synthetic events to Splunk HEC
 
     Examples:
-      # Plan scenarios (no execution)
-      python -m itsi_accelerator degrade --pack apm_pack.json
+      # OTel Demo — hardcoded scenarios, no AI call
+      python -m itsi_accelerator degrade --pack astroshop_pack.json \\
+        --vertical otel-demo --target otel-demo
 
-      # Run the cascade scenario against k8s
+      # Run the payment failure scenario immediately
+      python -m itsi_accelerator degrade --pack astroshop_pack.json \\
+        --vertical otel-demo --scenario payment --target otel-demo --duration 120
+
+      # AI-generated scenarios against k8s
       python -m itsi_accelerator degrade --pack apm_pack.json \\
         --scenario cascade --target k8s --namespace otel-demo --duration 300
-
-      # OTel Demo feature flag injection
-      python -m itsi_accelerator degrade --pack apm_pack.json \\
-        --target otel-demo --featureflag-url http://localhost:8013
     """
-    from itsi_accelerator.ai.scenario_generator import generate_scenarios
     from itsi_accelerator.degrade.executor import run_scenario
+    from itsi_accelerator.templates.scenarios import get_scenarios_for_vertical, list_scenario_verticals
 
     pack_dict = json.loads(Path(pack).read_text())
     services_raw = pack_dict.get("data", {}).get("services", [])
@@ -593,35 +683,51 @@ def degrade(pack, scenario, target, duration, namespace, kubeconfig, hec_url, he
         console.print("[red]No services found in pack.[/]")
         sys.exit(1)
 
-    # Build service summary for scenario generator
-    services_summary = []
-    for s in services_raw:
-        kpis = [k for k in s.get("kpis", []) if k.get("title") != "ServiceHealthScore"]
-        services_summary.append({
-            "name": s["title"],
-            "description": s.get("description", ""),
-            "ci_type": _infer_ci_type_from_tags(s.get("tags", [])),
-            "sla_critical": "sla-critical" in " ".join(s.get("tags", [])).lower(),
-            "kpis": kpis[:4],
-        })
-
     console.print(Panel(
         f"[bold]Pack:[/] {pack_dict.get('title', pack)}\n"
         f"[bold]Services:[/] {len(services_raw)}\n"
         f"[bold]Target:[/] {target}\n"
-        f"[bold]Duration:[/] {duration}s",
+        f"[bold]Duration:[/] {duration}s"
+        + (f"\n[bold]Vertical:[/] {vertical} [dim](pre-built scenarios)[/]" if vertical else ""),
         title="[cyan]ITSI Degradation Scenarios[/]",
     ))
 
-    with console.status("[cyan]Claude is generating demo scenarios...[/]"):
-        scenarios = generate_scenarios(services=services_summary, context=context)
+    # Use pre-built scenarios if a known vertical is specified — no AI call needed
+    if vertical:
+        scenarios = get_scenarios_for_vertical(vertical)
+        if scenarios is None:
+            available = ", ".join(list_scenario_verticals())
+            console.print(f"[red]No pre-built scenarios for vertical '{vertical}'.[/] Available: {available}")
+            console.print("[dim]Falling back to Claude-generated scenarios...[/]")
+            scenarios = None
+        else:
+            console.print(f"[green]Loaded {len(scenarios)} pre-built scenarios for '{vertical}'.[/]")
+    else:
+        scenarios = None
+
+    if scenarios is None:
+        # Build service summary for Claude
+        from itsi_accelerator.ai.scenario_generator import generate_scenarios
+        services_summary = []
+        for s in services_raw:
+            kpis = [k for k in s.get("kpis", []) if k.get("title") != "ServiceHealthScore"]
+            services_summary.append({
+                "name": s["title"],
+                "description": s.get("description", ""),
+                "ci_type": _infer_ci_type_from_tags(s.get("tags", [])),
+                "sla_critical": "sla-critical" in " ".join(s.get("tags", [])).lower(),
+                "kpis": kpis[:4],
+            })
+        with console.status("[cyan]Claude is generating demo scenarios...[/]"):
+            scenarios = generate_scenarios(services=services_summary, context=context)
 
     if not scenarios:
         console.print("[red]No scenarios generated.[/]")
         sys.exit(1)
 
     # Print scenario menu
-    console.print(f"\n[bold]Generated {len(scenarios)} scenarios:[/]\n")
+    source_label = "pre-built" if vertical and get_scenarios_for_vertical(vertical) else "generated"
+    console.print(f"\n[bold]{len(scenarios)} {source_label} scenarios:[/]\n")
     table = Table(show_lines=False)
     table.add_column("#", style="dim", width=3)
     table.add_column("Scenario", style="bold")
@@ -717,7 +823,14 @@ def degrade(pack, scenario, target, duration, namespace, kubeconfig, hec_url, he
               help="Episode break-after-silence window in minutes")
 @click.option("--no-correlation-searches", is_flag=True, default=False,
               help="Skip AI-generated correlation searches (NEAPs only)")
-def neap(pack, output, index, context, silence, no_correlation_searches):
+@click.option("--validate", is_flag=True, default=False,
+              help="Dry-run each correlation search SPL against a live Splunk instance and flag zero-result searches")
+@click.option("--validate-url", default="", envvar="SPLUNK_URL",
+              help="Splunk base URL for validation (env: SPLUNK_URL), e.g. https://my-show.splunkcloud.com")
+@click.option("--validate-token", default="", envvar="SPLUNK_TOKEN",
+              help="Splunk Bearer token for validation (env: SPLUNK_TOKEN)")
+def neap(pack, output, index, context, silence, no_correlation_searches,
+         validate, validate_url, validate_token):
     """
     Generate NEAPs + correlation searches for an existing content pack.
 
@@ -725,11 +838,17 @@ def neap(pack, output, index, context, silence, no_correlation_searches):
     service, grouping notables into episodes. Correlation searches are AI-generated
     SPL that fire notables into those episodes.
 
+    Use --validate to dry-run each SPL against a live Splunk instance. Zero-result
+    searches are flagged as warnings — the SPL is likely referencing wrong index/fields.
+
     Output is a separate JSON bundle loaded via the ITSI REST API or packaged into
     a Splunk app alongside the content pack.
 
-    Example:
+    Examples:
       python -m itsi_accelerator neap --pack apm_pack.json -o apm_neap_bundle.json
+
+      python -m itsi_accelerator neap --pack apm_pack.json \\
+        --validate --validate-url https://my-show.splunkcloud.com --validate-token <token>
     """
     from itsi_accelerator.core.models import CorrelationSearch, NotableEventAggregationPolicy
     from itsi_accelerator.templates.neap_templates import build_neaps
@@ -808,7 +927,68 @@ def neap(pack, output, index, context, silence, no_correlation_searches):
             ))
         console.print(f"[dim]Generated {len(cs_objects)} correlation searches[/]")
 
-    # 3. Serialize
+    # 3. Optionally validate SPL against a live Splunk instance
+    if validate and cs_objects:
+        if not validate_url or not validate_token:
+            console.print("[yellow]--validate requires --validate-url and --validate-token (or SPLUNK_URL/SPLUNK_TOKEN env vars). Skipping validation.[/]")
+        else:
+            import requests
+            import urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+            session = requests.Session()
+            session.verify = False
+            session.headers.update({
+                "Authorization": f"Bearer {validate_token}",
+            })
+
+            console.print(f"\n[bold]Validating {len(cs_objects)} correlation search(es) against {validate_url}...[/]")
+            val_table = Table(show_lines=False)
+            val_table.add_column("Search", style="bold", max_width=40)
+            val_table.add_column("Result count", justify="right")
+            val_table.add_column("Status")
+
+            warn_count = 0
+            for cs in cs_objects:
+                # Run search with count=1 — we only care whether ANY results exist
+                spl = cs.search if cs.search.startswith("search ") else f"search {cs.search}"
+                try:
+                    resp = session.post(
+                        f"{validate_url.rstrip('/')}/services/search/jobs/export",
+                        data={
+                            "search": spl,
+                            "output_mode": "json",
+                            "earliest_time": "-60m",
+                            "latest_time": "now",
+                            "count": 10,
+                        },
+                        timeout=20,
+                    )
+                    result_count = sum(
+                        1 for line in resp.text.strip().splitlines()
+                        if '"result"' in line
+                    )
+                    if result_count == 0:
+                        status = "[yellow]WARN: 0 results[/]"
+                        warn_count += 1
+                    else:
+                        status = f"[green]OK[/]"
+                    val_table.add_row(cs.name[:40], str(result_count), status)
+                except Exception as e:
+                    val_table.add_row(cs.name[:40], "—", f"[red]ERROR: {str(e)[:60]}[/]")
+                    warn_count += 1
+
+            console.print(val_table)
+            if warn_count:
+                console.print(
+                    f"\n[yellow]{warn_count} search(es) returned no results.[/] "
+                    "These may reference wrong index names or field values. "
+                    "Edit the SPL in the bundle JSON before loading into ITSI."
+                )
+            else:
+                console.print(f"\n[green]All {len(cs_objects)} searches returned results.[/]")
+
+    # 4. Serialize
     bundle = {
         "title": pack_title,
         "_pack_key": pack_dict.get("_key", ""),
